@@ -10,9 +10,9 @@ except ModuleNotFoundError as exc:
         "  python test_prompt.py"
     ) from exc
 
-from ai_agents.agents.thumbnail_generator.agent import run_thumbnail_agent
-
 load_dotenv()
+
+from ai_agents import run_thumbnail_agent
 
 REFERENCE_URL = "https://thumbnail-generator-ai-agent.s3.ap-south-1.amazonaws.com/reference.jpeg"
 BASE_URL = "https://thumbnail-generator-ai-agent.s3.ap-south-1.amazonaws.com/base.jpeg"
