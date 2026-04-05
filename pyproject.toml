@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "ai-agents-service"
+version = "0.1.0"
+description = "AI agents service"
+authors = []
+readme = "README.md"
+packages = [{ include = "ai_agents" }]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+langchain = "*"
+langchain-core = "*"
+langchain-openai = "*"
+python-dotenv = "*"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
