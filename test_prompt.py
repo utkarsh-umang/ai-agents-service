@@ -1,4 +1,4 @@
-"""Smoke test: Gemini (Nano Banana) thumbnail generation from public image URLs."""
+"""Smoke test: OpenAI GPT Image thumbnail (reference + base images → PNG bytes)."""
 
 try:
     from dotenv import load_dotenv
@@ -10,23 +10,28 @@ except ModuleNotFoundError as exc:
         "  python test_prompt.py"
     ) from exc
 
-from ai_agents.agents.thumbnail_generator.generator import generate_with_nanobanana
+from ai_agents.agents.thumbnail_generator.agent import run_thumbnail_agent
 
 load_dotenv()
 
-# Public HTTPS images (replace with S3 presigned URLs for private objects).
 REFERENCE_URL = "https://thumbnail-generator-ai-agent.s3.ap-south-1.amazonaws.com/reference.jpeg"
 BASE_URL = "https://thumbnail-generator-ai-agent.s3.ap-south-1.amazonaws.com/base.jpeg"
 
-image_bytes = generate_with_nanobanana(
+result = run_thumbnail_agent(
+    model="gptimage",
     reference_image_url=REFERENCE_URL,
     base_image_urls=[BASE_URL],
     title="I Survived 30 Days",
     include_title=True,
-    creative_comments="Make it feel intense and dramatic",
+    creative_comments="Strong focal point, energetic but mainstream YouTube style",
 )
 
-with open("output_thumbnail.png", "wb") as f:
-    f.write(image_bytes)
+raw = result["image_bytes"]
+if not isinstance(raw, (bytes, bytearray)):
+    raise TypeError("Expected image_bytes to be bytes")
+out_path = "output_thumbnail.png"
+with open(out_path, "wb") as f:
+    f.write(bytes(raw))
 
-print("Saved to output_thumbnail.png")
+print(f"Saved to {out_path}")
+print("Prompt length:", len(str(result["prompt_used"])))

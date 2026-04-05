@@ -15,6 +15,10 @@ chmod +x run_test.sh
 
 That creates `.venv` with **Homebrew or `/usr/local` Python 3.10+** (not pyenv), installs deps with `pip install -e .`, and runs `test_prompt.py`.
 
+`test_prompt.py` uses **`run_thumbnail_agent(model="gptimage", ...)`**: **OpenAI GPT Image** (`images.edit` with `gpt-image-1` or similar) takes the **reference + base images** plus a text brief and returns **PNG bytes** (base64 in the API response—there is no permanent URL). You need **`OPENAI_API_KEY`** and org access to GPT Image.
+
+To try **Gemini (Nano Banana)** instead, call `run_thumbnail_agent(model="nanobanana", ...)` (requires **`GEMINI_API_KEY`**).
+
 ## Manual setup (same as the script)
 
 ```bash
@@ -36,7 +40,10 @@ Create `.env` (not committed) with:
 
 ## Notes
 
-Gemini image models may return **429** if quota or billing is insufficient—see [Gemini rate limits](https://ai.google.dev/gemini-api/docs/rate-limits).
+- The old **GPT-4o analyst + DALL-E 3** text-only path was removed in favor of true **image-conditioned** OpenAI **GPT Image** (same architectural idea as Nano Banana: images + prompt → image).
+- **`analyst.py`** is unused by the default pipeline; kept for reference or experiments.
+- Gemini image models may return **429** if quota or billing is insufficient—see [Gemini rate limits](https://ai.google.dev/gemini-api/docs/rate-limits).
+- OpenAI image endpoints have their own quotas; see [OpenAI limits](https://platform.openai.com/settings/organization/limits).
 
 Poetry is optional; only use it after fixing pyenv or putting a working `python` ahead of `~/.pyenv/shims` in `PATH`.
 
