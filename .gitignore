@@ -1,2 +1,5 @@
 __pycache__/
+.venv/
 .env
+output_thumbnail.png
+.DS_Store

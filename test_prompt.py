@@ -1,22 +1,32 @@
-from dotenv import load_dotenv
-from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI
+"""Smoke test: Gemini (Nano Banana) thumbnail generation from public image URLs."""
 
-from ai_agents.agents.thumbnail_generator.prompts import thumbnail_prompt
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependencies. Activate the project venv and install:\n"
+        "  python3 -m venv .venv && source .venv/bin/activate\n"
+        "  pip install -U pip && pip install -e .\n"
+        "  python test_prompt.py"
+    ) from exc
+
+from ai_agents.agents.thumbnail_generator.generator import generate_with_nanobanana
 
 load_dotenv()
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+# Public HTTPS images (replace with S3 presigned URLs for private objects).
+REFERENCE_URL = "https://thumbnail-generator-ai-agent.s3.ap-south-1.amazonaws.com/reference.jpeg"
+BASE_URL = "https://thumbnail-generator-ai-agent.s3.ap-south-1.amazonaws.com/base.jpeg"
 
-chain = thumbnail_prompt | llm | StrOutputParser()
-
-result = chain.invoke(
-    {
-        "system_prompt": "Focus on high contrast and bold typography.",
-        "title": "10 Python Tips That Will Change How You Code",
-        "include_title": True,
-        "creative_comments": "Make it feel urgent and exciting",
-    }
+image_bytes = generate_with_nanobanana(
+    reference_image_url=REFERENCE_URL,
+    base_image_urls=[BASE_URL],
+    title="I Survived 30 Days",
+    include_title=True,
+    creative_comments="Make it feel intense and dramatic",
 )
 
-print(result)
+with open("output_thumbnail.png", "wb") as f:
+    f.write(image_bytes)
+
+print("Saved to output_thumbnail.png")

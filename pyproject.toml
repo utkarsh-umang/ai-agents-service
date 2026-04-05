@@ -12,6 +12,9 @@ langchain = "*"
 langchain-core = "*"
 langchain-openai = "*"
 python-dotenv = "*"
+google-genai = "^1.70.0"
+pillow = "^12.2.0"
+httpx = "^0.28.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
