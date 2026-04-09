@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from ai_agents.agents.thumbnail_generator.generator import generate_with_nanobanana
+from ai_agents.agents.thumbnail_generator.nanobanana_image_generator import generate_with_nanobanana
 from ai_agents.agents.thumbnail_generator.gpt_image_generator import (
     generate_with_gpt_image,
 )

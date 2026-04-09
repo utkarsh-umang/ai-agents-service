@@ -7,7 +7,7 @@ from typing import Literal
 
 from openai import OpenAI
 
-from ai_agents.agents.thumbnail_generator.generator import fetch_and_encode
+from ai_agents.agents.thumbnail_generator.nanobanana_image_generator import fetch_and_encode
 from ai_agents.agents.thumbnail_generator.prompts import (
     THUMBNAIL_SYSTEM_PROMPT,
     build_user_instruction,
