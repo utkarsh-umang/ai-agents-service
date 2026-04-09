@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-import httpx
+
 from google import genai
 from google.genai import types
 
@@ -16,6 +16,7 @@ from ai_agents.agents.thumbnail_generator.prompts import (
     THUMBNAIL_SYSTEM_PROMPT,
     build_user_instruction,
 )
+from ai_agents.agents.thumbnail_generator.utils import fetch_and_encode
 
 
 def _gemini_api_key() -> str:
@@ -25,26 +26,6 @@ def _gemini_api_key() -> str:
             "Set GEMINI_API_KEY or GOOGLE_API_KEY for Gemini image generation."
         )
     return key
-
-
-_DEFAULT_HEADERS = {
-    "User-Agent": "ai-agents-service/0.1 (thumbnail-generator; httpx)",
-}
-
-
-def fetch_and_encode(url: str) -> tuple[bytes, str]:
-    """Fetch image from URL; return (raw_bytes, mime_type)."""
-    response = httpx.get(
-        url,
-        follow_redirects=True,
-        timeout=60.0,
-        headers=_DEFAULT_HEADERS,
-    )
-    response.raise_for_status()
-    content_type = response.headers.get("content-type", "image/jpeg")
-    mime_type = content_type.split(";")[0].strip()
-    return response.content, mime_type
-
 
 def generate_with_nanobanana(
     reference_image_url: str,
