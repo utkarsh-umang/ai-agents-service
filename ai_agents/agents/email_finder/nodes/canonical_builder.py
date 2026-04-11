@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 import litellm
-from core.llm import langfuse, get_prompt
-from agents.email_finder.state import (
+from ai_agents.core.llm import langfuse, get_prompt
+from ai_agents.agents.email_finder.state import (
     EmailFinderState,
     CanonicalLead,
     Identity,

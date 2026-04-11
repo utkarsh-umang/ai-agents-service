@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 from langgraph.graph import StateGraph, END
-from agents.email_finder.state import (
+from ai_agents.agents.email_finder.state import (
     EmailFinderState,
     LeadStatus,
     SourceType,
 )
-from agents.email_finder.nodes.canonical_builder import canonical_builder_node
-from agents.email_finder.nodes.perplexity_discovery import perplexity_discovery_node
+from ai_agents.agents.email_finder.nodes.canonical_builder import canonical_builder_node
+from ai_agents.agents.email_finder.nodes.perplexity_discovery import perplexity_discovery_node
 
 
 # ── Node wrappers ────────────────────────────────────────────────────────────

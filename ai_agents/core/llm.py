@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 import litellm
 from langfuse import Langfuse
-from core.config import (
+from ai_agents.core.config import (
     PERPLEXITY_API_KEY,
     LANGFUSE_EMAIL_FINDER_PUBLIC_KEY,
     LANGFUSE_EMAIL_FINDER_SECRET_KEY,

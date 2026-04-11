@@ -4,8 +4,8 @@ import json
 import re
 from typing import Optional
 import litellm
-from core.llm import langfuse, get_prompt
-from agents.email_finder.state import (
+from ai_agents.core.llm import langfuse, get_prompt
+from ai_agents.agents.email_finder.state import (
     EmailFinderState,
     EmailCandidate,
     LeadStatus,
