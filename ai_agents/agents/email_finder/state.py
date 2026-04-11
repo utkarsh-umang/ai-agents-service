@@ -59,6 +59,9 @@ class EmailCandidate(BaseModel):
 class CanonicalLead(BaseModel):
     identity: Identity
     website: Optional[str] = None
+    # Non-social, non-standalone URLs (linktr.ee, beacons.ai, carrd.co, etc.)
+    # that are useful as discovery hints for Perplexity but aren't the host's own domain
+    discovery_urls: list[str] = Field(default_factory=list)
     existing_email: Optional[str] = None
     social_links: SocialLinks = Field(default_factory=SocialLinks)
     source_type: SourceType = SourceType.OTHER

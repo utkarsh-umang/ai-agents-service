@@ -26,10 +26,11 @@ os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST
 os.environ["PERPLEXITY_API_KEY"] = PERPLEXITY_API_KEY
 
 
-def get_prompt(prompt_name: str, fallback: str) -> str:
-    """Fetch prompt from Langfuse, fall back to local if unavailable."""
-    try:
-        prompt = langfuse.get_prompt(prompt_name)
-        return prompt.compile()
-    except Exception:
-        return fallback
+def get_prompt(prompt_name: str, **variables: str) -> str:
+    """Fetch and compile a prompt from Langfuse.
+
+    Raises LangfuseNotFoundError if the prompt doesn't exist in Langfuse.
+    Run scripts/seed_langfuse_prompts.py to create all required prompts.
+    """
+    prompt = langfuse.get_prompt(prompt_name)
+    return prompt.compile(**variables)

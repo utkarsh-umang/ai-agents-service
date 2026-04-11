@@ -24,39 +24,6 @@ SOCIAL_PLATFORM_DOMAINS = {
     "linkedin.com": "linkedin",
 }
 
-FALLBACK_PROMPT = """
-You are a data normalization assistant.
-
-You will receive a raw row from a CSV file and a source type.
-Your job is to extract and classify the fields into a structured format.
-
-Source type: {source_type}
-Raw row: {raw_row}
-
-Extract the following and return as JSON only, no explanation:
-{{
-    "host_name": "string or null",
-    "podcast_name": "string or null",
-    "channel_name": "string or null",
-    "brand_name": "string or null",
-    "website": "string or null — only if it is a standalone domain, not a social platform",
-    "existing_email": "string or null",
-    "social_links": {{
-        "facebook": "string or null",
-        "twitter": "string or null",
-        "instagram": "string or null",
-        "youtube": "string or null",
-        "linkedin": "string or null"
-    }}
-}}
-
-Rules:
-- Any URL belonging to a social platform must go into social_links, never into website
-- website is only a standalone domain like https://example.com
-- If a field is not present or not inferrable, set it to null
-- Do not invent or guess values
-"""
-
 
 def _detect_social_platform(url: str) -> str | None:
     """Check if a URL belongs to a known social platform."""
@@ -76,20 +43,16 @@ def _is_valid_email(value: str) -> bool:
 
 def _extract_via_llm(raw_row: dict, source_type: SourceType) -> dict:
     """Use LiteLLM + OpenAI to classify raw row fields."""
-    prompt_text = get_prompt(
-        prompt_name="canonical_builder",
-        fallback=FALLBACK_PROMPT,
-    )
-
-    filled_prompt = prompt_text.format(
+    filled_prompt = get_prompt(
+        "canonical_builder",
         source_type=source_type.value,
         raw_row=str(raw_row),
     )
 
     response = litellm.completion(
-        model="gpt-4o-mini",        # cheap, fast, more than enough for classification
+        model="gpt-4o-mini",
         messages=[{"role": "user", "content": filled_prompt}],
-        response_format={"type": "json_object"},   # enforces JSON output, no need to strip fences
+        response_format={"type": "json_object"},
         metadata={
             "langfuse_session_id": "canonical_builder",
         },
@@ -117,7 +80,15 @@ def _build_from_llm_output(
     if existing_email and not _is_valid_email(existing_email):
         existing_email = None
 
-    # Build social links — also catch any social URLs that slipped into website
+    # Collect discovery URLs (linktr.ee, beacons.ai, carrd.co, etc.)
+    # Reject any that are actually social platform URLs
+    raw_discovery = llm_output.get("discovery_urls") or []
+    discovery_urls = [
+        url for url in raw_discovery
+        if url and not _detect_social_platform(url)
+    ]
+
+    # Build social links
     raw_social = llm_output.get("social_links", {})
     social_links = SocialLinks(
         facebook=raw_social.get("facebook"),
@@ -137,6 +108,7 @@ def _build_from_llm_output(
     return CanonicalLead(
         identity=identity,
         website=website,
+        discovery_urls=discovery_urls,
         existing_email=existing_email,
         social_links=social_links,
         source_type=source_type,
@@ -164,7 +136,11 @@ def canonical_builder_node(
 
         trace.event(
             name="canonical_lead_built",
-            metadata={"source_type": source_type.value},
+            metadata={
+                "source_type": source_type.value,
+                "has_website": bool(lead.website),
+                "discovery_urls_count": len(lead.discovery_urls),
+            },
         )
 
         return EmailFinderState(

@@ -13,44 +13,6 @@ from ai_agents.agents.email_finder.state import (
 )
 
 
-FALLBACK_PROMPT = """
-You are an expert at finding contact emails for podcasts and YouTube channels.
-
-You will be given information about a podcast or YouTube channel.
-Your job is to find the best contact email for reaching the host or creator directly.
-
-Available information:
-{available_info}
-
-Instructions:
-- Search for the contact email of this person or show
-- Prefer personal emails over generic ones (avoid info@, contact@, hello@, support@)
-- If you find multiple emails, list all of them
-- For each email found, mention where you found it (website, social media, etc.)
-- If you cannot find any email, say so clearly
-
-Return your response as JSON only:
-{{
-    "emails_found": [
-        {{
-            "email": "string",
-            "source": "string — where you found it",
-            "confidence": 0.0 to 1.0,
-            "note": "string or null"
-        }}
-    ],
-    "search_summary": "brief summary of what you found and where you looked"
-}}
-
-Confidence scoring guide:
-- 1.0 — found directly on their personal website or LinkedIn
-- 0.8 — found on podcast/channel website contact page
-- 0.6 — found on social media bio or linktree
-- 0.4 — found mentioned in a third party source
-- 0.2 — inferred or uncertain
-"""
-
-
 def _build_query(state: EmailFinderState) -> str:
     """
     Construct the search query from available lead information.
@@ -82,6 +44,10 @@ def _build_query(state: EmailFinderState) -> str:
     if lead.website:
         parts.append(f"Website: {lead.website}")
 
+    # Discovery URLs (linktr.ee, beacons.ai, carrd.co, etc.)
+    for url in lead.discovery_urls:
+        parts.append(f"Profile/Link page: {url}")
+
     # Existing email as a hint
     if lead.existing_email:
         parts.append(
@@ -110,7 +76,6 @@ def _parse_perplexity_response(content: str) -> list[EmailCandidate]:
     Parse Perplexity response into EmailCandidate list.
     Handles cases where response has markdown fences.
     """
-    # Strip markdown fences if present
     content = re.sub(
         r"^```json|^```|```$", "", content.strip(), flags=re.MULTILINE
     ).strip()
@@ -169,25 +134,20 @@ def perplexity_discovery_node(state: EmailFinderState) -> EmailFinderState:
     )
 
     try:
-        # Build query
         available_info = _build_query(state)
         trace.event(
             name="query_built",
             metadata={"available_info": available_info},
         )
 
-        # Fetch prompt
-        prompt_text = get_prompt(
-            prompt_name="perplexity_email_discovery",
-            fallback=FALLBACK_PROMPT,
+        filled_prompt = get_prompt(
+            "perplexity_email_discovery",
+            available_info=available_info,
         )
 
-        filled_prompt = prompt_text.format(available_info=available_info)
-
-        # Call Perplexity via LiteLLM
         span = trace.span(name="perplexity_call")
         response = litellm.completion(
-            model="perplexity/sonar",
+            model="perplexity/sonar-pro",
             messages=[{"role": "user", "content": filled_prompt}],
             metadata={
                 "langfuse_session_id": "perplexity_discovery",
@@ -196,7 +156,6 @@ def perplexity_discovery_node(state: EmailFinderState) -> EmailFinderState:
         )
         span.end()
 
-        # Parse response
         content = response.choices[0].message.content.strip()
         candidates = _parse_perplexity_response(content)
         ranked = _rank_candidates(candidates)
@@ -206,7 +165,6 @@ def perplexity_discovery_node(state: EmailFinderState) -> EmailFinderState:
             metadata={"count": len(ranked)},
         )
 
-        # Update state
         updated_candidates = state.email_candidates + ranked
         best_email = ranked[0] if ranked else state.best_email
         status = (
