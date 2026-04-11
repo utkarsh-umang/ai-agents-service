@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import nest_asyncio
 from typing import Any
 from langgraph.graph import StateGraph, END
 from ai_agents.agents.email_finder.state import (
@@ -175,8 +176,14 @@ def run_batch(
     source_type: SourceType,
     concurrency: int = 5,
 ) -> list[dict]:
-    """
-    Sync wrapper for batch runner.
-    This is what you call from your main service.
-    """
-    return asyncio.run(run_batch_async(rows, source_type, concurrency))
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're in Jupyter — use nest_asyncio
+            
+            nest_asyncio.apply()
+        return asyncio.run(run_batch_async(rows, source_type, concurrency))
+    except RuntimeError:
+        return asyncio.get_event_loop().run_until_complete(
+            run_batch_async(rows, source_type, concurrency)
+        )

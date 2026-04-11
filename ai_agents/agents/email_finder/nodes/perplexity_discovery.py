@@ -134,16 +134,11 @@ def _call_perplexity_agent(prompt: str) -> str:
     return "".join(text_parts).strip()
 
 
-def _parse_response(content: str) -> list[EmailCandidate]:
-    """
-    Parse the agent response into EmailCandidate list.
-    Strips markdown fences and stray citation markers before parsing JSON.
-    """
-    # Strip markdown fences
-    content = re.sub(r"^```json|^```|```$", "", content.strip(), flags=re.MULTILINE).strip()
-
-    # Strip Perplexity citation markers like [web:1], [page:2], [web:1][web:2]
-    content = re.sub(r"\[\w+:\d+\]", "", content)
+def _parse_perplexity_response(content: str) -> list[EmailCandidate]:
+    # Strip markdown fences if present
+    content = re.sub(
+        r"^```json|^```|```$", "", content.strip(), flags=re.MULTILINE
+    ).strip()
 
     try:
         data = json.loads(content)
@@ -183,65 +178,31 @@ def _rank_candidates(candidates: list[EmailCandidate]) -> list[EmailCandidate]:
 
 
 def perplexity_discovery_node(state: EmailFinderState) -> EmailFinderState:
-    """
-    Uses the Perplexity Agent API (pro-search preset) to find email candidates.
-    Equivalent to the browser Pro Search mode: web_search + fetch_url, up to 3 steps.
-    """
-    trace = langfuse.trace(
-        name="perplexity_discovery",
-        metadata={
-            "source_type": state.lead.source_type.value,
-            "best_name": state.lead.identity.best_name(),
-            "preset": _PRESET,
-        },
-    )
-
     try:
         available_info = _build_query(state)
-        trace.event(
-            name="query_built",
-            metadata={"available_info": available_info},
-        )
-
+        
+        # Use get_prompt the same way your working call does
         filled_prompt = get_prompt(
             "perplexity_email_discovery",
-            available_info=available_info,
+            available_info=available_info
         )
 
-        span = trace.span(name="perplexity_agent_call", input=filled_prompt)
+        # Use Agent API not LiteLLM
         raw_content = _call_perplexity_agent(filled_prompt)
-        span.end(output=raw_content)
-
-        candidates = _parse_response(raw_content)
+        
+        candidates = _parse_perplexity_response(raw_content)
         ranked = _rank_candidates(candidates)
 
-        trace.event(
-            name="candidates_found",
-            metadata={"count": len(ranked)},
-        )
-
-        updated_candidates = state.email_candidates + ranked
-        best_email = ranked[0] if ranked else state.best_email
-        status = LeadStatus.EMAIL_FOUND if ranked else LeadStatus.EMAIL_NOT_FOUND
-
-        return state.model_copy(
-            update={
-                "status": status,
-                "email_candidates": updated_candidates,
-                "best_email": best_email,
-                "nodes_executed": state.nodes_executed + ["perplexity_discovery"],
-            }
-        )
+        return state.model_copy(update={
+            "status": LeadStatus.EMAIL_FOUND if ranked else LeadStatus.EMAIL_NOT_FOUND,
+            "email_candidates": state.email_candidates + ranked,
+            "best_email": ranked[0] if ranked else state.best_email,
+            "nodes_executed": state.nodes_executed + ["perplexity_discovery"],
+        })
 
     except Exception as e:
-        trace.event(
-            name="perplexity_discovery_failed",
-            metadata={"error": str(e)},
-        )
-        return state.model_copy(
-            update={
-                "status": LeadStatus.FAILED,
-                "errors": state.errors + [f"perplexity_discovery: {str(e)}"],
-                "nodes_executed": state.nodes_executed + ["perplexity_discovery"],
-            }
-        )
+        return state.model_copy(update={
+            "status": LeadStatus.FAILED,
+            "errors": state.errors + [f"perplexity_discovery: {str(e)}"],
+            "nodes_executed": state.nodes_executed + ["perplexity_discovery"],
+        })
