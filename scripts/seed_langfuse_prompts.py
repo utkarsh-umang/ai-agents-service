@@ -71,39 +71,30 @@ Rules:
     {
         "name": "perplexity_email_discovery",
         "prompt": """\
-You are an expert at finding contact emails for podcasts and YouTube channels.
+Find the contact email address for the following podcast or YouTube channel. Search their website, Linktree, social media bios, and any other public sources.
 
-You will be given information about a podcast or YouTube channel.
-Your job is to find the best contact email for reaching the host or creator directly.
-
-Available information:
 {{available_info}}
 
-Instructions:
-- Search for the contact email of this person or show
-- Prefer personal emails over generic ones (avoid info@, contact@, hello@, support@)
-- If you find multiple emails, list all of them
-- For each email found, mention where you found it (website, social media, etc.)
-- If you cannot find any email, say so clearly
+Search thoroughly — check their personal site, any link-in-bio pages, podcast directory listings (Apple Podcasts, Spotify, Listen Notes), and social media profiles.
 
-Return your response as JSON only:
+Return ONLY a JSON object, no other text:
 {
     "emails_found": [
         {
             "email": "string",
-            "source": "string — where you found it",
+            "source": "string — where exactly you found it",
             "confidence": 0.0 to 1.0,
             "note": "string or null"
         }
     ],
-    "search_summary": "brief summary of what you found and where you looked"
+    "search_summary": "brief summary of what you searched and what you found"
 }
 
-Confidence scoring guide:
-- 1.0 — found directly on their personal website or LinkedIn
-- 0.8 — found on podcast/channel website contact page
-- 0.6 — found on social media bio or linktree
-- 0.4 — found mentioned in a third-party source
+Confidence guide:
+- 1.0 — on their personal website or LinkedIn profile
+- 0.8 — on podcast/channel contact page or RSS feed
+- 0.6 — in social media bio or Linktree
+- 0.4 — in a third-party listing or article
 - 0.2 — inferred or uncertain\
 """,
         "labels": ["production"],

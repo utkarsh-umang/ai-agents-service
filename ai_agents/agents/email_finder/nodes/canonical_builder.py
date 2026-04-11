@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlparse, urlencode, parse_qsl
 import litellm
 from ai_agents.core.llm import langfuse, get_prompt
 from ai_agents.agents.email_finder.state import (
@@ -25,6 +26,22 @@ SOCIAL_PLATFORM_DOMAINS = {
 }
 
 
+# Query params that add no value for discovery (ad/analytics tracking)
+_TRACKING_PARAMS = {
+    "fbclid", "gclid", "msclkid", "utm_source", "utm_medium",
+    "utm_campaign", "utm_term", "utm_content", "ref", "igshid",
+}
+
+
+def _strip_tracking_params(url: str) -> str:
+    """Remove ad/analytics tracking query params from a URL."""
+    parsed = urlparse(url)
+    clean_qs = urlencode(
+        [(k, v) for k, v in parse_qsl(parsed.query) if k not in _TRACKING_PARAMS]
+    )
+    return parsed._replace(query=clean_qs).geturl()
+
+
 def _detect_social_platform(url: str) -> str | None:
     """Check if a URL belongs to a known social platform."""
     if not url:
@@ -41,7 +58,7 @@ def _is_valid_email(value: str) -> bool:
     return bool(re.match(pattern, value.strip()))
 
 
-def _extract_via_llm(raw_row: dict, source_type: SourceType) -> dict:
+def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> dict:
     """Use LiteLLM + OpenAI to classify raw row fields."""
     filled_prompt = get_prompt(
         "canonical_builder",
@@ -54,7 +71,8 @@ def _extract_via_llm(raw_row: dict, source_type: SourceType) -> dict:
         messages=[{"role": "user", "content": filled_prompt}],
         response_format={"type": "json_object"},
         metadata={
-            "langfuse_session_id": "canonical_builder",
+            "langfuse_trace_id": trace_id,
+            "langfuse_session_id": "email_finder",
         },
     )
 
@@ -81,10 +99,11 @@ def _build_from_llm_output(
         existing_email = None
 
     # Collect discovery URLs (linktr.ee, beacons.ai, carrd.co, etc.)
-    # Reject any that are actually social platform URLs
+    # Strip tracking params and reject any that are social platform URLs
     raw_discovery = llm_output.get("discovery_urls") or []
     discovery_urls = [
-        url for url in raw_discovery
+        _strip_tracking_params(url)
+        for url in raw_discovery
         if url and not _detect_social_platform(url)
     ]
 
@@ -129,7 +148,7 @@ def canonical_builder_node(
 
     try:
         span = trace.span(name="llm_classification")
-        llm_output = _extract_via_llm(raw_row, source_type)
+        llm_output = _extract_via_llm(raw_row, source_type, trace_id=trace.id)
         span.end()
 
         lead = _build_from_llm_output(llm_output, source_type, raw_row)
