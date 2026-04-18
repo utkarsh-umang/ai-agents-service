@@ -135,16 +135,14 @@ def _build_from_llm_output(
     )
 
 
-def canonical_builder_node(
+def canonical_builder_to_graph_dict(
     raw_row: dict[str, Any],
     source_type: SourceType,
-) -> EmailFinderState:
+) -> dict[str, Any]:
     """
-    Entry point node.
-    Takes a raw CSV row + source type.
-    Returns a fully initialized EmailFinderState.
+    LangGraph entry node: returns partial state including trace_id and empty reducer lists.
     """
-    trace = langfuse.trace(name="canonical_builder")
+    trace = langfuse.trace(name="canonical_builder", session_id="email_finder")
 
     try:
         span = trace.span(name="llm_classification")
@@ -162,12 +160,35 @@ def canonical_builder_node(
             },
         )
 
-        return EmailFinderState(
-            lead=lead,
-            status=LeadStatus.PENDING,
-            nodes_executed=["canonical_builder"],
-        )
+        return {
+            "lead": lead.model_dump(mode="json"),
+            "status": LeadStatus.PENDING.value,
+            "email_candidates": [],
+            "errors": [],
+            "nodes_executed": ["canonical_builder"],
+            "trace_id": trace.id,
+            "website_scrape_candidates": [],
+            "scrape_plan": [],
+        }
 
     except Exception as e:
         trace.event(name="canonical_builder_failed", metadata={"error": str(e)})
         raise
+
+
+def canonical_builder_node(
+    raw_row: dict[str, Any],
+    source_type: SourceType,
+) -> EmailFinderState:
+    """
+    Entry point node.
+    Takes a raw CSV row + source type.
+    Returns a fully initialized EmailFinderState.
+    """
+    payload = canonical_builder_to_graph_dict(raw_row, source_type)
+    lead = CanonicalLead.model_validate(payload["lead"])
+    return EmailFinderState(
+        lead=lead,
+        status=LeadStatus.PENDING,
+        nodes_executed=["canonical_builder"],
+    )
