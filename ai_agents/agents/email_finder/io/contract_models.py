@@ -1,0 +1,112 @@
+"""
+Pydantic input/output contracts per email-finder node.
+
+Downstream nodes depend only on these types, not ad-hoc dict shapes.
+"""
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
+
+from ai_agents.agents.email_finder.state import (
+    CanonicalLead,
+    EmailCandidate,
+    LeadStatus,
+    SourceType,
+)
+
+
+class CanonicalBuilderInput(BaseModel):
+    """Input for canonical_builder."""
+
+    raw_row: dict[str, Any]
+    source_type: SourceType
+
+
+class CanonicalBuilderOutput(BaseModel):
+    """Output from canonical_builder."""
+
+    lead: CanonicalLead
+    status: LeadStatus = LeadStatus.PENDING
+    errors: list[str] = Field(default_factory=list)
+    nodes_executed_delta: list[str] = Field(default_factory=lambda: ["canonical_builder"])
+    trace_id: str = Field(description="Langfuse trace id for downstream spans")
+
+
+class DiscoveryInput(BaseModel):
+    """Input for url discovery (sitemap + homepage links)."""
+
+    lead: CanonicalLead
+    max_urls: int = Field(default=5, ge=1, le=20)
+    trace_id: str
+
+
+class DiscoveryMeta(BaseModel):
+    """Structured discovery diagnostics for Langfuse and debugging."""
+
+    sitemap_urls_found: int = 0
+    homepage_links_found: int = 0
+    strategies: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class DiscoveryOutput(BaseModel):
+    """Output from url discovery."""
+
+    scrape_plan: list[str] = Field(default_factory=list)
+    discovery_meta: DiscoveryMeta = Field(default_factory=DiscoveryMeta)
+    errors: list[str] = Field(default_factory=list)
+    nodes_executed_delta: list[str] = Field(default_factory=lambda: ["url_discovery"])
+
+
+class CrawlPageInput(BaseModel):
+    """Input for a single parallel crawl worker (Send payload)."""
+
+    url: str
+    lead: CanonicalLead
+    trace_id: str
+    page_timeout_ms: int = Field(default=60000)
+
+
+class CrawlPageOutput(BaseModel):
+    """Output from one page crawl (merged via reducer)."""
+
+    candidates: list[EmailCandidate] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    page_url: str = ""
+
+
+class ResolveInput(BaseModel):
+    """Input for resolve_best_email (website-sourced candidates only)."""
+
+    lead: CanonicalLead
+    website_candidates: list[EmailCandidate]
+    trace_id: str
+
+
+class ResolveOutput(BaseModel):
+    """Output from resolver LLM."""
+
+    best_email: Optional[EmailCandidate] = None
+    status: LeadStatus = LeadStatus.EMAIL_NOT_FOUND
+    errors: list[str] = Field(default_factory=list)
+    nodes_executed_delta: list[str] = Field(default_factory=lambda: ["resolve_best_email"])
+
+
+class PerplexityInput(BaseModel):
+    """Input for perplexity_discovery."""
+
+    lead: CanonicalLead
+    trace_id: str
+    prior_email_candidates: list[EmailCandidate] = Field(default_factory=list)
+
+
+class PerplexityOutput(BaseModel):
+    """Output from perplexity_discovery."""
+
+    email_candidates: list[EmailCandidate]
+    best_email: Optional[EmailCandidate] = None
+    status: LeadStatus
+    errors: list[str] = Field(default_factory=list)
+    nodes_executed_delta: list[str] = Field(default_factory=lambda: ["perplexity_discovery"])

@@ -6,6 +6,7 @@ import re
 from urllib.parse import urlparse
 import httpx
 from ai_agents.core.llm import langfuse, get_prompt
+from ai_agents.agents.email_finder.io.contract_models import PerplexityInput, PerplexityOutput
 from ai_agents.agents.email_finder.state import (
     EmailFinderState,
     EmailCandidate,
@@ -177,32 +178,95 @@ def _rank_candidates(candidates: list[EmailCandidate]) -> list[EmailCandidate]:
     return sorted(candidates, key=score, reverse=True)
 
 
-def perplexity_discovery_node(state: EmailFinderState) -> EmailFinderState:
+def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
+    """Contract-based Perplexity discovery."""
+    trace = langfuse.trace(
+        id=inp.trace_id,
+        name="email_finder",
+        session_id="email_finder",
+    )
+    span = trace.span(name="perplexity_discovery")
+
     try:
-        available_info = _build_query(state)
-        
-        # Use get_prompt the same way your working call does
+        ef_state = EmailFinderState(
+            lead=inp.lead,
+            status=LeadStatus.PENDING,
+            email_candidates=inp.prior_email_candidates,
+        )
+        available_info = _build_query(ef_state)
+
         filled_prompt = get_prompt(
             "perplexity_email_discovery",
             available_info=available_info
         )
 
-        # Use Agent API not LiteLLM
         raw_content = _call_perplexity_agent(filled_prompt)
-        
-        candidates = _parse_perplexity_response(raw_content)
-        ranked = _rank_candidates(candidates)
 
-        return state.model_copy(update={
-            "status": LeadStatus.EMAIL_FOUND if ranked else LeadStatus.EMAIL_NOT_FOUND,
-            "email_candidates": state.email_candidates + ranked,
-            "best_email": ranked[0] if ranked else state.best_email,
-            "nodes_executed": state.nodes_executed + ["perplexity_discovery"],
-        })
+        candidates = _parse_perplexity_response(raw_content)
+        combined = inp.prior_email_candidates + candidates
+        ranked = _rank_candidates(combined)
+
+        span.end()
+        trace.event(
+            name="perplexity_complete",
+            metadata={"new_candidates": len(candidates), "ranked_total": len(ranked)},
+        )
+
+        if not ranked:
+            return PerplexityOutput(
+                email_candidates=combined,
+                best_email=None,
+                status=LeadStatus.EMAIL_NOT_FOUND,
+                errors=[],
+            )
+
+        return PerplexityOutput(
+            email_candidates=combined,
+            best_email=ranked[0],
+            status=LeadStatus.EMAIL_FOUND,
+            errors=[],
+        )
 
     except Exception as e:
-        return state.model_copy(update={
-            "status": LeadStatus.FAILED,
-            "errors": state.errors + [f"perplexity_discovery: {str(e)}"],
-            "nodes_executed": state.nodes_executed + ["perplexity_discovery"],
-        })
+        span.end()
+        trace.event(name="perplexity_failed", metadata={"error": str(e)})
+        return PerplexityOutput(
+            email_candidates=inp.prior_email_candidates,
+            best_email=None,
+            status=LeadStatus.FAILED,
+            errors=[f"perplexity_discovery: {str(e)}"],
+        )
+
+
+def perplexity_discovery_node(state: EmailFinderState) -> EmailFinderState:
+    """Legacy EmailFinderState API — builds PerplexityInput with a synthetic trace id."""
+
+    trace = langfuse.trace(name="perplexity_discovery", session_id="email_finder")
+    inp = PerplexityInput(
+        lead=state.lead,
+        trace_id=trace.id,
+        prior_email_candidates=list(state.email_candidates),
+    )
+    out = perplexity_discovery_run(inp)
+    return state.model_copy(update={
+        "status": out.status,
+        "email_candidates": out.email_candidates,
+        "best_email": out.best_email,
+        "errors": state.errors + out.errors,
+        "nodes_executed": state.nodes_executed + out.nodes_executed_delta,
+    })
+
+
+async def perplexity_discovery_node_async(state: dict) -> dict:
+    """LangGraph async node."""
+    from ai_agents.agents.email_finder.adapters import perplexity_input_from_state
+
+    inp = perplexity_input_from_state(state)
+    out = perplexity_discovery_run(inp)
+    return {
+        "status": out.status.value,
+        "email_candidates": [c.model_dump(mode="json") for c in out.email_candidates],
+        "best_email": out.best_email.model_dump(mode="json") if out.best_email else None,
+        "errors": out.errors,
+        "nodes_executed": out.nodes_executed_delta,
+    }

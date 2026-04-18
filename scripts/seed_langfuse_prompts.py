@@ -99,6 +99,32 @@ Confidence guide:
 """,
         "labels": ["production"],
     },
+    {
+        "name": "email_resolver",
+        "prompt": """\
+You are selecting the single best contact email for outreach to a podcast host or YouTube creator.
+
+Canonical lead (JSON):
+{{canonical_lead_json}}
+
+Candidate emails found on their website (JSON array, may be empty):
+{{candidates_json}}
+
+Rules:
+- Prefer a personal or show-specific address over generic inboxes (info@, contact@, support@) when both exist and the personal one clearly belongs to the same person/show.
+- Prefer addresses on the same domain as the lead website when applicable.
+- If no candidate is suitable, return chosen_email as null.
+- Do not invent emails that are not in the candidates list.
+
+Return ONLY valid JSON, no markdown:
+{
+    "chosen_email": "string or null",
+    "confidence": 0.0,
+    "reason": "short explanation"
+}\
+""",
+        "labels": ["production"],
+    },
 ]
 
 
