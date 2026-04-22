@@ -4,7 +4,10 @@ from typing import Literal
 
 from ai_agents.agents.thumbnail_generator.nanobanana_image_generator import generate_with_nanobanana
 from ai_agents.agents.thumbnail_generator.gpt_image_generator import generate_with_gpt_image
-from ai_agents.agents.thumbnail_generator.prompts import build_user_instruction
+from ai_agents.agents.thumbnail_generator.prompts import (
+    build_thumbnail_system_prompt,
+    build_user_instruction,
+)
 
 
 def run_thumbnail_agent(
@@ -14,6 +17,7 @@ def run_thumbnail_agent(
     title: str,
     include_title: bool,
     creative_comments: str,
+    shorts_or_reels: bool = False,
 ) -> dict[str, object]:
     """
     Route to OpenAI GPT Image (true image edit) or Gemini (Nano Banana).
@@ -27,9 +31,11 @@ def run_thumbnail_agent(
             title=title,
             include_title=include_title,
             creative_comments=creative_comments,
+            shorts_or_reels=shorts_or_reels,
         )
-        prompt_used = build_user_instruction(
-            title, include_title, creative_comments
+        prompt_used = (
+            f"{build_thumbnail_system_prompt(shorts_or_reels)}\n\n"
+            f"{build_user_instruction(title, include_title, creative_comments, shorts_or_reels)}"
         )
         print(f"[nanobanana] instruction:\n{prompt_used}\n")
         return {"image_bytes": image_bytes, "prompt_used": prompt_used}
@@ -40,6 +46,7 @@ def run_thumbnail_agent(
         title=title,
         include_title=include_title,
         creative_comments=creative_comments,
+        shorts_or_reels=shorts_or_reels,
     )
 
 
@@ -49,6 +56,7 @@ def run_thumbnail_agent_gpt_image(
     title: str,
     include_title: bool,
     creative_comments: str,
+    shorts_or_reels: bool = False,
     model: str = "gpt-image-1",
 ) -> dict[str, object]:
     """
@@ -63,6 +71,7 @@ def run_thumbnail_agent_gpt_image(
         title=title,
         include_title=include_title,
         creative_comments=creative_comments,
+        shorts_or_reels=shorts_or_reels,
         model=model,
     )
 

@@ -13,7 +13,7 @@ from google import genai
 from google.genai import types
 
 from ai_agents.agents.thumbnail_generator.prompts import (
-    THUMBNAIL_SYSTEM_PROMPT,
+    build_thumbnail_system_prompt,
     build_user_instruction,
 )
 from ai_agents.agents.thumbnail_generator.utils import fetch_and_encode
@@ -33,6 +33,7 @@ def generate_with_nanobanana(
     title: str,
     include_title: bool,
     creative_comments: str,
+    shorts_or_reels: bool = False,
     model_variant: str = "gemini-3.1-flash-image-preview",
 ) -> bytes:
     """
@@ -40,7 +41,8 @@ def generate_with_nanobanana(
     """
     client = genai.Client(api_key=_gemini_api_key())
 
-    contents: list[str | types.Part] = [THUMBNAIL_SYSTEM_PROMPT]
+    system_text = build_thumbnail_system_prompt(shorts_or_reels)
+    contents: list[str | types.Part] = [system_text]
 
     ref_bytes, ref_mime = fetch_and_encode(reference_image_url)
     contents.append(types.Part.from_bytes(data=ref_bytes, mime_type=ref_mime))
@@ -50,8 +52,12 @@ def generate_with_nanobanana(
         contents.append(types.Part.from_bytes(data=img_bytes, mime_type=img_mime))
 
     contents.append(
-        build_user_instruction(title, include_title, creative_comments)
+        build_user_instruction(
+            title, include_title, creative_comments, shorts_or_reels
+        )
     )
+
+    aspect_ratio = "9:16" if shorts_or_reels else "16:9"
 
     response = client.models.generate_content(
         model=model_variant,
@@ -59,7 +65,7 @@ def generate_with_nanobanana(
         config=types.GenerateContentConfig(
             response_modalities=["IMAGE"],
             image_config=types.ImageConfig(
-                aspect_ratio="16:9",
+                aspect_ratio=aspect_ratio,
                 image_size="2K",
             ),
         ),

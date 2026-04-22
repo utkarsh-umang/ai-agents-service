@@ -16,6 +16,7 @@ Required environment variables (validated on import): ``OPENAI_API_KEY``,
         title: str,
         include_title: bool,
         creative_comments: str,
+        shorts_or_reels: bool = False,
     ) -> dict[str, object]:
         ...
 

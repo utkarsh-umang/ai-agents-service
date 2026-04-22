@@ -8,7 +8,7 @@ from typing import Literal
 from openai import OpenAI
 
 from ai_agents.agents.thumbnail_generator.prompts import (
-    THUMBNAIL_SYSTEM_PROMPT,
+    build_thumbnail_system_prompt,
     build_user_instruction,
 )
 from ai_agents.agents.thumbnail_generator.utils import fetch_and_encode
@@ -27,11 +27,15 @@ def build_gpt_image_prompt(
     title: str,
     include_title: bool,
     creative_comments: str,
+    shorts_or_reels: bool = False,
 ) -> str:
-    """Full text prompt: Nano-style system rules + per-request instructions."""
-    user_part = build_user_instruction(title, include_title, creative_comments)
+    """Full text prompt: shared system rules + GPT image-order hint + user brief."""
+    system = build_thumbnail_system_prompt(shorts_or_reels)
+    user_part = build_user_instruction(
+        title, include_title, creative_comments, shorts_or_reels
+    )
     return (
-        f"{THUMBNAIL_SYSTEM_PROMPT}\n\n"
+        f"{system}\n\n"
         "Image order: the FIRST file is the REFERENCE thumbnail (match its style). "
         "The NEXT file(s) are BASE subject photo(s) to keep as the main subject.\n\n"
         f"{user_part}"
@@ -44,6 +48,7 @@ def generate_with_gpt_image(
     title: str,
     include_title: bool,
     creative_comments: str,
+    shorts_or_reels: bool = False,
     model: str = "gpt-image-1",
     input_fidelity: Literal["high", "low"] = "high",
 ) -> tuple[bytes, str]:
@@ -52,7 +57,10 @@ def generate_with_gpt_image(
 
     Returns ``(image_bytes, prompt_used)``. GPT Image models return base64, not URLs.
     """
-    prompt = build_gpt_image_prompt(title, include_title, creative_comments)
+    prompt = build_gpt_image_prompt(
+        title, include_title, creative_comments, shorts_or_reels
+    )
+    size = "1024x1536" if shorts_or_reels else "1536x1024"
 
     ref_raw, ref_mime = fetch_and_encode(reference_image_url)
     files: list[tuple[str | None, bytes, str | None]] = [
@@ -69,7 +77,7 @@ def generate_with_gpt_image(
         model=model,
         image=files,
         prompt=prompt,
-        size="1536x1024",
+        size=size,
         input_fidelity=input_fidelity,
         quality="high",
         output_format="png",
