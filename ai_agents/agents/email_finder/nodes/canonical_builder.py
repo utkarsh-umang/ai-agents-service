@@ -95,8 +95,15 @@ def _build_from_llm_output(
 
     # Sanitize existing email
     existing_email = llm_output.get("existing_email")
-    if existing_email and not _is_valid_email(existing_email):
-        existing_email = None
+    if existing_email:
+        # Handle comma-separated multiple emails — take first valid one
+        for candidate in re.split(r"[,;]\s*", existing_email):
+            if _is_valid_email(candidate.strip()):
+                existing_email = candidate.strip()
+                break
+        else:
+            existing_email = None
+
 
     # Collect discovery URLs (linktr.ee, beacons.ai, carrd.co, etc.)
     # Strip tracking params and reject any that are social platform URLs
@@ -150,6 +157,8 @@ def canonical_builder_to_graph_dict(
         span.end()
 
         lead = _build_from_llm_output(llm_output, source_type, raw_row)
+        print(f"[canonical_builder] social_links: {lead.social_links}")
+        print(f"[canonical_builder] llm_output raw: {llm_output}")
 
         trace.event(
             name="canonical_lead_built",

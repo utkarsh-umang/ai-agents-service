@@ -34,6 +34,9 @@ class EmailFinderGraphState(TypedDict, total=False):
     # Reducer: parallel crawl_page workers append EmailCandidate dicts
     website_scrape_candidates: Annotated[list[dict[str, Any]], operator.add]
 
+    # Reducer: parallel crawl_page workers append FB links found in page HTML
+    scraped_fb_links: Annotated[list[str], operator.add]
+
     errors: Annotated[list[str], operator.add]
     nodes_executed: Annotated[list[str], operator.add]
 

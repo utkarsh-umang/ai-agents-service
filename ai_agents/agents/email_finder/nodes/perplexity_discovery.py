@@ -181,11 +181,10 @@ def _rank_candidates(candidates: list[EmailCandidate]) -> list[EmailCandidate]:
 def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
     """Contract-based Perplexity discovery."""
     trace = langfuse.trace(
-        id=inp.trace_id,
-        name="email_finder",
-        session_id="email_finder",
+        name="perplexity_discovery",
+        session_id=inp.trace_id,
     )
-    span = trace.span(name="perplexity_discovery")
+    span = trace.span(name="perplexity_api_call")
 
     try:
         ef_state = EmailFinderState(
@@ -200,11 +199,17 @@ def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
             available_info=available_info
         )
 
+        span.update(
+            input={"prompt": filled_prompt},
+        )
         raw_content = _call_perplexity_agent(filled_prompt)
-
         candidates = _parse_perplexity_response(raw_content)
         combined = inp.prior_email_candidates + candidates
         ranked = _rank_candidates(combined)
+
+        span.update(
+            output={"raw_response": raw_content[:1000]},
+        )
 
         span.end()
         trace.event(
@@ -228,20 +233,22 @@ def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
         )
 
     except Exception as e:
+        error_msg = str(e)
         span.end()
-        trace.event(name="perplexity_failed", metadata={"error": str(e)})
+        trace.event(name="perplexity_failed", metadata={"error": error_msg})
         return PerplexityOutput(
             email_candidates=inp.prior_email_candidates,
             best_email=None,
             status=LeadStatus.FAILED,
-            errors=[f"perplexity_discovery: {str(e)}"],
+            errors=[f"perplexity_discovery: {error_msg}"],
         )
+
 
 
 def perplexity_discovery_node(state: EmailFinderState) -> EmailFinderState:
     """Legacy EmailFinderState API — builds PerplexityInput with a synthetic trace id."""
 
-    trace = langfuse.trace(name="perplexity_discovery", session_id="email_finder")
+    trace = langfuse.trace(name="perplexity_api_call", session_id=inp.trace_id)
     inp = PerplexityInput(
         lead=state.lead,
         trace_id=trace.id,

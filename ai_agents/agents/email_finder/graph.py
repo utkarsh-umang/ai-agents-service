@@ -13,6 +13,7 @@ from ai_agents.agents.email_finder.nodes.canonical_builder import (
     canonical_builder_to_graph_dict,
 )
 from ai_agents.agents.email_finder.nodes.crawl_page import crawl_page_node_async
+from ai_agents.agents.email_finder.nodes.fb_crawler import fb_crawler_node_async
 from ai_agents.agents.email_finder.nodes.perplexity_discovery import (
     perplexity_discovery_node_async,
 )
@@ -20,6 +21,9 @@ from ai_agents.agents.email_finder.nodes.resolve_best_email import (
     resolve_best_email_node_async,
 )
 from ai_agents.agents.email_finder.nodes.url_discovery import discover_urls_node_async
+from ai_agents.agents.email_finder.nodes.validate_existing_email import (
+    validate_existing_email_node_async,
+)
 from ai_agents.agents.email_finder.state import LeadStatus, SourceType
 
 
@@ -33,7 +37,21 @@ def run_canonical_builder(state: EmailFinderGraphState) -> dict[str, Any]:
 
 def route_after_canonical(state: EmailFinderGraphState) -> str:
     lead = state.get("lead") or {}
-    w = lead.get("website")
+    existing_email = lead.get("existing_email")
+    website = lead.get("website")
+
+    if existing_email and str(existing_email).strip():
+        return "validate_existing_email"
+    elif website and str(website).strip():
+        return "discover_urls"
+    else:
+        return "perplexity_discovery"
+
+
+def route_after_validate(state: EmailFinderGraphState) -> str:
+    if state.get("status") == LeadStatus.EMAIL_FOUND.value:
+        return END
+    w = (state.get("lead") or {}).get("website")
     if w and str(w).strip():
         return "discover_urls"
     return "perplexity_discovery"
@@ -62,6 +80,23 @@ def route_after_discover(state: EmailFinderGraphState) -> str | list[Send]:
 def route_after_resolve(state: EmailFinderGraphState) -> str:
     if state.get("status") == LeadStatus.EMAIL_FOUND.value:
         return END
+
+    # Check FB link availability: structured data first, then scraped
+    lead = state.get("lead") or {}
+    social = lead.get("social_links") or {}
+    fb_from_lead = social.get("facebook") or ""
+    fb_from_scrape = state.get("scraped_fb_links") or []
+
+    has_fb = bool(fb_from_lead.strip()) or bool(fb_from_scrape)
+
+    if has_fb:
+        return "fb_crawler"
+    return "perplexity_discovery"
+
+
+def route_after_fb_crawler(state: EmailFinderGraphState) -> str:
+    if state.get("status") == LeadStatus.EMAIL_FOUND.value:
+        return END
     return "perplexity_discovery"
 
 
@@ -72,10 +107,12 @@ def build_graph() -> StateGraph:
     graph = StateGraph(EmailFinderGraphState)
 
     graph.add_node("canonical_builder", run_canonical_builder)
+    graph.add_node("validate_existing_email", validate_existing_email_node_async)
     graph.add_node("discover_urls", discover_urls_node_async)
     graph.add_node("crawl_page", crawl_page_node_async)
     graph.add_node("resolve_best_email", resolve_best_email_node_async)
     graph.add_node("perplexity_discovery", perplexity_discovery_node_async)
+    graph.add_node("fb_crawler", fb_crawler_node_async)
 
     graph.set_entry_point("canonical_builder")
 
@@ -83,6 +120,17 @@ def build_graph() -> StateGraph:
         "canonical_builder",
         route_after_canonical,
         {
+            "validate_existing_email": "validate_existing_email",
+            "discover_urls": "discover_urls",
+            "perplexity_discovery": "perplexity_discovery",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "validate_existing_email",
+        route_after_validate,
+        {
+            END: END,
             "discover_urls": "discover_urls",
             "perplexity_discovery": "perplexity_discovery",
         },
@@ -102,6 +150,16 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "resolve_best_email",
         route_after_resolve,
+        {
+            END: END,
+            "fb_crawler": "fb_crawler",
+            "perplexity_discovery": "perplexity_discovery",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "fb_crawler",
+        route_after_fb_crawler,
         {
             END: END,
             "perplexity_discovery": "perplexity_discovery",

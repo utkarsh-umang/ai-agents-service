@@ -75,6 +75,7 @@ class CrawlPageOutput(BaseModel):
     candidates: list[EmailCandidate] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     page_url: str = ""
+    fb_links: list[str] = Field(default_factory=list)
 
 
 class ResolveInput(BaseModel):
@@ -110,3 +111,40 @@ class PerplexityOutput(BaseModel):
     status: LeadStatus
     errors: list[str] = Field(default_factory=list)
     nodes_executed_delta: list[str] = Field(default_factory=lambda: ["perplexity_discovery"])
+
+
+class ValidateEmailInput(BaseModel):
+    """Input for validate_existing_email."""
+
+    lead: CanonicalLead
+    trace_id: str
+
+
+class ValidateEmailOutput(BaseModel):
+    """Output from validate_existing_email."""
+
+    best_email: Optional[EmailCandidate] = None
+    status: LeadStatus = LeadStatus.EMAIL_NOT_FOUND
+    errors: list[str] = Field(default_factory=list)
+    nodes_executed_delta: list[str] = Field(
+        default_factory=lambda: ["validate_existing_email"]
+    )
+
+
+class FBCrawlerInput(BaseModel):
+    """Input for fb_crawler node."""
+
+    lead: CanonicalLead
+    fb_link: str
+    trace_id: str
+
+
+class FBCrawlerOutput(BaseModel):
+    """Output from fb_crawler node."""
+
+    best_email: Optional[EmailCandidate] = None
+    status: LeadStatus = LeadStatus.EMAIL_NOT_FOUND
+    errors: list[str] = Field(default_factory=list)
+    nodes_executed_delta: list[str] = Field(
+        default_factory=lambda: ["fb_crawler"]
+    )
