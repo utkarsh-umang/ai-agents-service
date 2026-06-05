@@ -24,6 +24,11 @@ _KEYWORDS = (
     "get-in-touch",
     "reach",
     "hello",
+    "press",
+    "media",
+    "advertise",
+    "sponsor",
+    "partner",
 )
 
 def _normalize_origin(website: str) -> str | None:

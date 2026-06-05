@@ -6,16 +6,13 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 
 from ai_agents.agents.email_finder.adapters import crawl_input_from_worker_state, candidates_to_dicts
 from ai_agents.agents.email_finder.io.contract_models import CrawlPageInput, CrawlPageOutput
+from ai_agents.agents.email_finder.nodes.email_utils import confidence_for_email, enrich_confidence, filter_emails
 from ai_agents.agents.email_finder.state import EmailCandidate
 from ai_agents.core.llm import langfuse
 
 _EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+    r"[a-zA-Z0-9._%\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
     re.MULTILINE,
-)
-
-_GENERIC = frozenset(
-    {"info", "contact", "hello", "support", "admin", "team", "mail", "enquiries", "enquiry", "noreply"}
 )
 
 _FB_HREF_RE = re.compile(
@@ -42,7 +39,7 @@ def _extract_emails_from_text(text: str) -> list[str]:
         e = m.strip().rstrip(".,);]")
         if "@" in e and "." in e.split("@")[-1]:
             found.add(e.lower())
-    return list(found)
+    return filter_emails(list(found))
 
 
 def _mailto_from_html(html: str) -> list[str]:
@@ -51,43 +48,7 @@ def _mailto_from_html(html: str) -> list[str]:
         addr = m.group(1).split("?")[0].strip()
         if "@" in addr:
             out.append(addr)
-    return out
-
-
-def _confidence_for_email(email: str) -> float:
-    local = email.split("@")[0].lower()
-    if local in _GENERIC:
-        return 0.55
-    return 0.75
-
-
-def _enrich_confidence(
-    email: str,
-    url: str,
-    blob: str,
-    base_confidence: float,
-) -> tuple[float, str]:
-    local_part = email.split("@")[0].lower().rstrip("0123456789")
-
-    if len(local_part) < 4:
-        return base_confidence, "extracted from page content"
-
-    confidence = base_confidence
-    notes: list[str] = []
-
-    if local_part in url.lower():
-        confidence += 0.15
-        notes.append(f"local part '{local_part}' matched in URL")
-
-    if local_part in blob.lower():
-        confidence += 0.10
-        notes.append(f"local part '{local_part}' matched in page text")
-
-    confidence = min(confidence, 0.95)
-
-    note = "; ".join(notes) if notes else "extracted from page content"
-
-    return confidence, note
+    return filter_emails(out)
 
 
 def _extract_fb_links(html: str) -> list[str]:
@@ -107,6 +68,11 @@ def _extract_fb_links(html: str) -> list[str]:
     return out
 
 
+async def _crawl_once(browser_conf, run_conf, url: str):
+    async with AsyncWebCrawler(config=browser_conf) as crawler:
+        return await crawler.arun(url=url, config=run_conf)
+
+
 async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
     trace = langfuse.trace(
         id=inp.trace_id,
@@ -120,23 +86,29 @@ async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
         cache_mode=CacheMode.BYPASS,
         page_timeout=inp.page_timeout_ms,
     )
-    try:
-        async with AsyncWebCrawler(config=browser_conf) as crawler:
-            result = await crawler.arun(url=inp.url, config=run_conf)
-    except Exception as e:
+
+    result = None
+    last_error: str = ""
+    for attempt in range(1, 3):  # 2 attempts
+        try:
+            result = await _crawl_once(browser_conf, run_conf, inp.url)
+            if result.success:
+                break
+            last_error = result.error_message or "unknown crawl failure"
+            trace.event(name="crawl_failed", metadata={"url": inp.url, "attempt": attempt, "error": last_error})
+        except Exception as e:
+            # Truncate internal crawl4ai stack paths — keep only the first sentence
+            raw = str(e)
+            last_error = raw.split("\n")[0][:200]
+            trace.event(name="crawl_error", metadata={"url": inp.url, "attempt": attempt, "error": last_error})
+
+    if result is None or not result.success:
         span.end()
-        trace.event(name="crawl_timeout", metadata={"url": inp.url, "error": str(e)})
         return CrawlPageOutput(
             candidates=[],
-            errors=[f"crawl_page {inp.url}: {e}"],
+            errors=[f"crawl_page failed after retries: {last_error}"],
             page_url=inp.url,
         )
-
-    if not result.success:
-        err = result.error_message or "unknown"
-        span.end()
-        trace.event(name="crawl_failed", metadata={"url": inp.url, "error": err})
-        return CrawlPageOutput(candidates=[], errors=[f"{inp.url}: {err}"], page_url=inp.url)
 
     html = result.html or ""
     md = ""
@@ -151,9 +123,9 @@ async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
 
     candidates: list[EmailCandidate] = []
     for e in sorted(emails):
-        base_confidence = _confidence_for_email(e)
+        base_confidence = confidence_for_email(e)
 
-        enriched_confidence, note = _enrich_confidence(
+        enriched_confidence, note = enrich_confidence(
             e,
             inp.url,
             blob,

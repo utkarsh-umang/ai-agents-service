@@ -80,12 +80,13 @@ async def resolve_best_email_async(inp: ResolveInput) -> ResolveOutput:
 
     chosen = (data.get("chosen_email") or "").strip() or None
     if not chosen:
+        reason = data.get("reason") or "Resolver rejected all candidates"
         span.end()
-        trace.event(name="resolver_empty", metadata={"reason": data.get("reason")})
+        trace.event(name="resolver_empty", metadata={"reason": reason})
         return ResolveOutput(
             best_email=None,
             status=LeadStatus.EMAIL_NOT_FOUND,
-            errors=[],
+            errors=[f"resolver: {reason}"],
         )
 
     conf = float(data.get("confidence", 0.7))

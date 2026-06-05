@@ -129,6 +129,7 @@ class ValidateEmailOutput(BaseModel):
     nodes_executed_delta: list[str] = Field(
         default_factory=lambda: ["validate_existing_email"]
     )
+    sub_threshold_candidate: Optional[EmailCandidate] = None
 
 
 class FBCrawlerInput(BaseModel):

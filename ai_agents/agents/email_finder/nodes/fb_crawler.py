@@ -7,51 +7,12 @@ import os
 import httpx
 
 from ai_agents.agents.email_finder.io.contract_models import FBCrawlerInput, FBCrawlerOutput
+from ai_agents.agents.email_finder.nodes.email_utils import confidence_for_email, enrich_confidence, is_plus_addressed
 from ai_agents.agents.email_finder.state import EmailCandidate, LeadStatus
 from ai_agents.core.llm import langfuse
 
 _APIFY_ACTOR = "igview-owner~facebook-page-details-scraper"
 _APIFY_URL = f"https://api.apify.com/v2/actors/{_APIFY_ACTOR}/run-sync-get-dataset-items"
-
-_GENERIC = frozenset(
-    {"info", "contact", "hello", "support", "admin", "team", "mail", "enquiries", "enquiry", "noreply"}
-)
-
-
-def _confidence_for_email(email: str) -> float:
-    local = email.split("@")[0].lower()
-    if local in _GENERIC:
-        return 0.55
-    return 0.75
-
-
-def _enrich_confidence(
-    email: str,
-    url: str,
-    blob: str,
-    base_confidence: float,
-) -> tuple[float, str]:
-    local_part = email.split("@")[0].lower().rstrip("0123456789")
-
-    if len(local_part) < 4:
-        return base_confidence, "extracted from page content"
-
-    confidence = base_confidence
-    notes: list[str] = []
-
-    if local_part in url.lower():
-        confidence += 0.15
-        notes.append(f"local part '{local_part}' matched in URL")
-
-    if local_part in blob.lower():
-        confidence += 0.10
-        notes.append(f"local part '{local_part}' matched in page text")
-
-    confidence = min(confidence, 0.95)
-
-    note = "; ".join(notes) if notes else "extracted from page content"
-
-    return confidence, note
 
 
 def _fb_crawl(inp: FBCrawlerInput) -> FBCrawlerOutput:
@@ -61,8 +22,6 @@ def _fb_crawl(inp: FBCrawlerInput) -> FBCrawlerOutput:
         session_id="email_finder",
     )
     span = trace.span(name="fb_crawler", metadata={"fb_link": inp.fb_link})
-    print(f"[fb_crawler] fb_link received: {inp.fb_link!r}")  # ← add this
-
 
     api_token = os.environ.get("APIFY_API_TOKEN")
     if not api_token:
@@ -132,8 +91,13 @@ def _fb_crawl(inp: FBCrawlerInput) -> FBCrawlerOutput:
         page.get("title") or "",
     ]))
 
-    base_confidence = _confidence_for_email(email)
-    enriched_confidence, note = _enrich_confidence(
+    if is_plus_addressed(email):
+        span.end()
+        trace.event(name="fb_crawler_no_email", metadata={"fb_link": inp.fb_link, "reason": "plus-addressed email skipped"})
+        return FBCrawlerOutput()
+
+    base_confidence = confidence_for_email(email)
+    enriched_confidence, note = enrich_confidence(
         email,
         inp.fb_link,
         page_blob,
@@ -147,22 +111,48 @@ def _fb_crawl(inp: FBCrawlerInput) -> FBCrawlerOutput:
         note=note,
     )
 
+    status = LeadStatus.EMAIL_FOUND if enriched_confidence > 0.75 else LeadStatus.EMAIL_NOT_FOUND
+
     span.end()
     trace.event(
         name="fb_crawler_ok",
-        metadata={"fb_link": inp.fb_link, "email": email},
+        metadata={"fb_link": inp.fb_link, "email": email, "confidence": enriched_confidence},
     )
     return FBCrawlerOutput(
         best_email=best_email,
-        status=LeadStatus.EMAIL_FOUND,
+        status=status,
     )
 
 
 async def fb_crawler_node_async(state: dict) -> dict:
-    from ai_agents.agents.email_finder.adapters import fb_crawler_input_from_state
+    from ai_agents.agents.email_finder.adapters import fb_crawler_input_from_state, parse_canonical_lead
 
-    inp = fb_crawler_input_from_state(state)
-    out = await asyncio.to_thread(_fb_crawl, inp)
+    # Collect all available FB links — structured first, then scraped
+    lead_dict = state.get("lead") or {}
+    social = lead_dict.get("social_links") or {}
+    structured_fb = (social.get("facebook") or "").strip()
+    scraped_fb: list[str] = state.get("scraped_fb_links") or []
+
+    all_fb_links: list[str] = []
+    if structured_fb:
+        all_fb_links.append(structured_fb)
+    for link in scraped_fb:
+        if link not in all_fb_links:
+            all_fb_links.append(link)
+
+    if not all_fb_links:
+        inp = fb_crawler_input_from_state(state)
+        out = await asyncio.to_thread(_fb_crawl, inp)
+    else:
+        lead = parse_canonical_lead(state["lead"])
+        trace_id = state.get("trace_id", "")
+        out = FBCrawlerOutput(errors=["no_fb_link_available"])
+        for fb_link in all_fb_links:
+            candidate_inp = FBCrawlerInput(lead=lead, fb_link=fb_link, trace_id=trace_id)
+            out = await asyncio.to_thread(_fb_crawl, candidate_inp)
+            if out.best_email:
+                break
+
     return {
         "best_email": out.best_email.model_dump(mode="json") if out.best_email else None,
         "status": out.status.value,

@@ -77,6 +77,11 @@ Find the contact email address for the following podcast or YouTube channel. Sea
 
 Search thoroughly — check their personal site, any link-in-bio pages, podcast directory listings (Apple Podcasts, Spotify, Listen Notes), and social media profiles.
 
+Email quality rules (apply before including any email):
+- Exclude tagged/plus-addressed emails such as info+xyz@domain.com or contact+podcast@domain.com — the presence of a "+" in the local part is a strong signal that this is a filtered alias, not a real contact address.
+- Exclude generic platform no-reply addresses (noreply@, donotreply@, mailer@).
+- Prefer a personal or show-specific address over generic prefixes (info@, contact@, hello@, support@, admin@, team@) when both are available.
+
 Return ONLY a JSON object, no other text:
 {
     "emails_found": [
@@ -87,7 +92,8 @@ Return ONLY a JSON object, no other text:
             "note": "string or null"
         }
     ],
-    "search_summary": "brief summary of what you searched and what you found"
+    "search_summary": "brief summary of what you searched and what you found",
+    "not_found_reason": "string — only present when emails_found is empty; explain specifically what you searched and why no email was found (e.g. 'Website has a contact form only, no email address displayed. No email found in podcast RSS feed, Apple Podcasts listing, or social media bios.')"
 }
 
 Confidence guide:
@@ -113,14 +119,16 @@ Candidate emails found on their website (JSON array, may be empty):
 Rules:
 - Prefer a personal or show-specific address over generic inboxes (info@, contact@, support@) when both exist and the personal one clearly belongs to the same person/show.
 - Prefer addresses on the same domain as the lead website when applicable.
-- If no candidate is suitable, return chosen_email as null.
+- Reject tagged/plus-addressed emails (any email where the local part contains a "+", e.g. info+podcast@domain.com) — these are filtered aliases and not suitable for outreach.
+- Reject no-reply addresses (noreply@, donotreply@, mailer@).
+- If no candidate is suitable, return chosen_email as null and explain specifically why in the reason field (e.g. "All candidates are generic info@ addresses with no personal email available" or "Only a contact form was found, no direct email address").
 - Do not invent emails that are not in the candidates list.
 
 Return ONLY valid JSON, no markdown:
 {
     "chosen_email": "string or null",
     "confidence": 0.0,
-    "reason": "short explanation"
+    "reason": "short explanation — if chosen_email is null, explain specifically what was found and why none were suitable"
 }\
 """,
         "labels": ["production"],

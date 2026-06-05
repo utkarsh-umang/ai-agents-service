@@ -40,7 +40,8 @@ def route_after_canonical(state: EmailFinderGraphState) -> str:
     existing_email = lead.get("existing_email")
     website = lead.get("website")
 
-    if existing_email and str(existing_email).strip():
+    # Only validate-and-exit if we have an email AND no website to improve on
+    if existing_email and str(existing_email).strip() and not (website and str(website).strip()):
         return "validate_existing_email"
     elif website and str(website).strip():
         return "discover_urls"
@@ -81,16 +82,17 @@ def route_after_resolve(state: EmailFinderGraphState) -> str:
     if state.get("status") == LeadStatus.EMAIL_FOUND.value:
         return END
 
-    # Check FB link availability: structured data first, then scraped
-    lead = state.get("lead") or {}
-    social = lead.get("social_links") or {}
-    fb_from_lead = social.get("facebook") or ""
-    fb_from_scrape = state.get("scraped_fb_links") or []
+    # Only invoke the slow FB crawler if scraping produced zero candidates
+    candidates = state.get("email_candidates") or []
+    if not candidates:
+        lead = state.get("lead") or {}
+        social = lead.get("social_links") or {}
+        fb_from_lead = social.get("facebook") or ""
+        fb_from_scrape = state.get("scraped_fb_links") or []
+        has_fb = bool(fb_from_lead.strip()) or bool(fb_from_scrape)
+        if has_fb:
+            return "fb_crawler"
 
-    has_fb = bool(fb_from_lead.strip()) or bool(fb_from_scrape)
-
-    if has_fb:
-        return "fb_crawler"
     return "perplexity_discovery"
 
 

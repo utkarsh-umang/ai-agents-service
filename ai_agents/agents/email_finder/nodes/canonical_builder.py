@@ -6,7 +6,6 @@ from urllib.parse import urlparse, urlencode, parse_qsl
 import litellm
 from ai_agents.core.llm import langfuse, get_prompt
 from ai_agents.agents.email_finder.state import (
-    EmailFinderState,
     CanonicalLead,
     Identity,
     SocialLinks,
@@ -149,7 +148,7 @@ def canonical_builder_to_graph_dict(
     """
     LangGraph entry node: returns partial state including trace_id and empty reducer lists.
     """
-    trace = langfuse.trace(name="canonical_builder", session_id="email_finder")
+    trace = langfuse.trace(name="email_finder", session_id="email_finder")
 
     try:
         span = trace.span(name="llm_classification")
@@ -157,8 +156,6 @@ def canonical_builder_to_graph_dict(
         span.end()
 
         lead = _build_from_llm_output(llm_output, source_type, raw_row)
-        print(f"[canonical_builder] social_links: {lead.social_links}")
-        print(f"[canonical_builder] llm_output raw: {llm_output}")
 
         trace.event(
             name="canonical_lead_built",
@@ -185,19 +182,3 @@ def canonical_builder_to_graph_dict(
         raise
 
 
-def canonical_builder_node(
-    raw_row: dict[str, Any],
-    source_type: SourceType,
-) -> EmailFinderState:
-    """
-    Entry point node.
-    Takes a raw CSV row + source type.
-    Returns a fully initialized EmailFinderState.
-    """
-    payload = canonical_builder_to_graph_dict(raw_row, source_type)
-    lead = CanonicalLead.model_validate(payload["lead"])
-    return EmailFinderState(
-        lead=lead,
-        status=LeadStatus.PENDING,
-        nodes_executed=["canonical_builder"],
-    )
