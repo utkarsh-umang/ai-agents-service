@@ -16,6 +16,11 @@ class EmailFinderGraphState(TypedDict, total=False):
     raw_row: dict[str, Any]
     source_type: str
 
+    # When True, the ScrapingBee youtube_about_enricher node is enabled for this
+    # run (used for lists known to be YouTube channels). Gated further on the
+    # lead actually having a YouTube URL. Defaults to False when absent.
+    youtube_list: NotRequired[bool]
+
     # Propagated observability
     trace_id: NotRequired[str]
 

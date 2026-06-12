@@ -113,6 +113,32 @@ class PerplexityOutput(BaseModel):
     nodes_executed_delta: list[str] = Field(default_factory=lambda: ["perplexity_discovery"])
 
 
+class YouTubeEnrichInput(BaseModel):
+    """Input for youtube_about_enricher (ScrapingBee channel About page)."""
+
+    lead: CanonicalLead
+    trace_id: str
+
+
+class YouTubeEnrichOutput(BaseModel):
+    """
+    Output from youtube_about_enricher.
+
+    `lead` is the enriched lead (website / social_links / discovery_urls filled
+    from the channel About page). `status` is PENDING when only enrichment
+    happened (graph continues), or EMAIL_FOUND if a plaintext email was on the page.
+    """
+
+    lead: CanonicalLead
+    email_candidates: list[EmailCandidate] = Field(default_factory=list)
+    best_email: Optional[EmailCandidate] = None
+    status: LeadStatus = LeadStatus.PENDING
+    errors: list[str] = Field(default_factory=list)
+    nodes_executed_delta: list[str] = Field(
+        default_factory=lambda: ["youtube_about_enricher"]
+    )
+
+
 class ValidateEmailInput(BaseModel):
     """Input for validate_existing_email."""
 
