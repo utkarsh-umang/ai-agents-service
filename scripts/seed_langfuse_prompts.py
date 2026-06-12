@@ -47,7 +47,7 @@ Extract the following and return as JSON only, no explanation:
     "podcast_name": "string or null",
     "channel_name": "string or null",
     "brand_name": "string or null",
-    "website": "string or null — only a true standalone domain owned by the host/show (e.g. https://example.com)",
+    "website": "string or null — only a true standalone domain owned by the target person/entity (e.g. https://example.com)",
     "discovery_urls": ["array of other non-social URLs like linktr.ee, beacons.ai, carrd.co, etc. — or empty array []"],
     "existing_email": "string or null",
     "social_links": {
@@ -61,21 +61,29 @@ Extract the following and return as JSON only, no explanation:
 
 Rules:
 - Social platform URLs (facebook, twitter/x, instagram, youtube, linkedin) → social_links only, never website or discovery_urls
-- website is only a true standalone domain that the host/show owns (e.g. https://jenniferrichardson.com)
+- website is only a true standalone domain that the target person/entity owns (e.g. https://jenniferrichardson.com)
 - Link aggregators and profile pages (linktr.ee, beacons.ai, carrd.co, linkin.bio, bio.site, campsite.bio) → discovery_urls
 - discovery_urls is always an array; use [] if none found
-- Do not invent or guess values; set null or [] when not present\
+- Do not invent or guess values; set null or [] when not present
+
+When source_type is "podscan_guest":
+- The TARGET is the GUEST (the person in "Guest Name"), NOT the podcast host
+- "Appeared On Podcast" is context only — use it to help identify the guest but do NOT extract the podcast's or host's information
+- Map "Guest Name" → host_name, "Company" → brand_name
+- website and social_links must belong to the GUEST or their company, never the podcast\
 """,
         "labels": ["production"],
     },
     {
         "name": "perplexity_email_discovery",
         "prompt": """\
-Find the contact email address for the following podcast or YouTube channel. Search their website, Linktree, social media bios, and any other public sources.
+Find the contact email address for the following person or entity. Search their website, Linktree, social media bios, and any other public sources.
 
 {{available_info}}
 
-Search thoroughly — check their personal site, any link-in-bio pages, podcast directory listings (Apple Podcasts, Spotify, Listen Notes), and social media profiles.
+Search thoroughly — check their personal site, company site, any link-in-bio pages, podcast directory listings (Apple Podcasts, Spotify, Listen Notes), and social media profiles.
+
+IMPORTANT: If the source_type is "podscan_guest", the target is the GUEST — find the guest's personal or company email, NOT the podcast host's email. The podcast name is context to help identify the person but the email must belong to the guest or their company.
 
 Email quality rules (apply before including any email):
 - Exclude tagged/plus-addressed emails such as info+xyz@domain.com or contact+podcast@domain.com — the presence of a "+" in the local part is a strong signal that this is a filtered alias, not a real contact address.
@@ -108,7 +116,7 @@ Confidence guide:
     {
         "name": "email_resolver",
         "prompt": """\
-You are selecting the single best contact email for outreach to a podcast host or YouTube creator.
+You are selecting the single best contact email for outreach to a person or entity.
 
 Canonical lead (JSON):
 {{canonical_lead_json}}
@@ -117,10 +125,11 @@ Candidate emails found on their website (JSON array, may be empty):
 {{candidates_json}}
 
 Rules:
-- Prefer a personal or show-specific address over generic inboxes (info@, contact@, support@) when both exist and the personal one clearly belongs to the same person/show.
+- Prefer a personal or show-specific address over generic inboxes (info@, contact@, support@) when both exist and the personal one clearly belongs to the same person/entity.
 - Prefer addresses on the same domain as the lead website when applicable.
 - Reject tagged/plus-addressed emails (any email where the local part contains a "+", e.g. info+podcast@domain.com) — these are filtered aliases and not suitable for outreach.
 - Reject no-reply addresses (noreply@, donotreply@, mailer@).
+- If the source_type is "podscan_guest", the email MUST belong to the guest or their company — reject any email that belongs to the podcast or its host.
 - If no candidate is suitable, return chosen_email as null and explain specifically why in the reason field (e.g. "All candidates are generic info@ addresses with no personal email available" or "Only a contact form was found, no direct email address").
 - Do not invent emails that are not in the candidates list.
 

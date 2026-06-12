@@ -209,11 +209,24 @@ async def run_single_async(
     raw_row: dict[str, Any],
     source_type: SourceType,
     semaphore: asyncio.Semaphore,
+    index: int = 0,
+    total: int = 0,
 ) -> dict[str, Any]:
     """Run a single lead through the graph with semaphore rate limiting."""
+    label = raw_row.get("Guest Name") or raw_row.get("Host Name") or raw_row.get("Podcast Name") or f"row-{index}"
     async with semaphore:
+        print(f"  [{index}/{total}] Starting: {label}")
         st_val = source_type.value if isinstance(source_type, SourceType) else source_type
-        return await graph.ainvoke({"raw_row": raw_row, "source_type": st_val})
+        result = await graph.ainvoke({"raw_row": raw_row, "source_type": st_val})
+        status = result.get("status", "?")
+        nodes = result.get("nodes_executed") or []
+        email = (result.get("best_email") or {}).get("email", "")
+        summary = f"status={status}"
+        if email:
+            summary += f" email={email}"
+        summary += f" path={' → '.join(nodes)}"
+        print(f"  [{index}/{total}] Done: {label} — {summary}")
+        return result
 
 
 async def run_batch_async(
@@ -227,10 +240,11 @@ async def run_batch_async(
     """
     graph = build_graph()
     semaphore = asyncio.Semaphore(concurrency)
+    total = len(rows)
 
     tasks = [
-        run_single_async(graph, row, source_type, semaphore)
-        for row in rows
+        run_single_async(graph, row, source_type, semaphore, i + 1, total)
+        for i, row in enumerate(rows)
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -238,6 +252,7 @@ async def run_batch_async(
     output = []
     for i, result in enumerate(results):
         if isinstance(result, Exception):
+            print(f"  [{i+1}/{total}] FAILED: {str(result)[:120]}")
             output.append({
                 "status": LeadStatus.FAILED.value,
                 "errors": [str(result)],
