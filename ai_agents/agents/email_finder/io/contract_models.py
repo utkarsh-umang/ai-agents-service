@@ -101,6 +101,32 @@ class PerplexityInput(BaseModel):
     lead: CanonicalLead
     trace_id: str
     prior_email_candidates: list[EmailCandidate] = Field(default_factory=list)
+    # Provenance of the lead (e.g. "speakerhub.com", "youtube api tool") — used as
+    # extra context to help identify/disambiguate the person.
+    source: Optional[str] = None
+
+
+class WebsiteGuessInput(BaseModel):
+    """Input for website_guesser."""
+
+    lead: CanonicalLead
+    trace_id: str
+    source: Optional[str] = None
+
+
+class WebsiteGuessOutput(BaseModel):
+    """
+    Output from website_guesser.
+
+    `lead` is returned (with `website` filled in when the model confidently knew
+    it). `status` stays PENDING either way — the graph continues to the website
+    crawl if a site was guessed, otherwise to Perplexity.
+    """
+
+    lead: CanonicalLead
+    status: LeadStatus = LeadStatus.PENDING
+    errors: list[str] = Field(default_factory=list)
+    nodes_executed_delta: list[str] = Field(default_factory=lambda: ["website_guesser"])
 
 
 class PerplexityOutput(BaseModel):

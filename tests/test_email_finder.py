@@ -131,8 +131,9 @@ def test_routing_website_first_then_enrich() -> None:
     assert route_after_canonical({"youtube_list": True, "lead": _YT_LEAD_WEB}) == "discover_urls"
     # No website → enrich from the About page to discover one
     assert route_after_canonical({"youtube_list": True, "lead": _YT_LEAD}) == "youtube_about_enricher"
-    # Flag off → never touches the enricher
-    assert route_after_canonical({"youtube_list": False, "lead": _YT_LEAD}) == "perplexity_discovery"
+    # Flag off → never touches the enricher; with no website it goes to the cheap
+    # website_guesser before Perplexity.
+    assert route_after_canonical({"youtube_list": False, "lead": _YT_LEAD}) == "website_guesser"
 
 
 def test_routing_after_enrich() -> None:
@@ -140,10 +141,10 @@ def test_routing_after_enrich() -> None:
     assert route_after_youtube_enrich(
         {"status": LeadStatus.PENDING.value, "lead": {"website": "https://learnwithhasan.com/"}}
     ) == "discover_urls"
-    # No website discovered → hand off to Perplexity with enriched socials
+    # No website discovered → try the cheap website_guesser before Perplexity
     assert route_after_youtube_enrich(
         {"status": LeadStatus.PENDING.value, "lead": {"social_links": {"twitter": "https://x.com/h"}}}
-    ) == "perplexity_discovery"
+    ) == "website_guesser"
     # A plaintext email was on the About page → done
     assert route_after_youtube_enrich({"status": LeadStatus.EMAIL_FOUND.value, "lead": {}}) == END
 
@@ -199,3 +200,69 @@ def test_no_key_uses_free_path_only(monkeypatch) -> None:
     monkeypatch.setattr(yt_node, "SCRAPINGBEE_API_KEY", "")
     monkeypatch.setattr(yt_node, "_fetch_about_http", lambda u: None)  # blocked, no key to fall back to
     assert yt_node.fetch_youtube_about(_CH) == {"links": [], "emails": []}
+
+
+# ── website_guesser node + routing ────────────────────────────────────────────
+
+import ai_agents.agents.email_finder.nodes.website_guesser as wg
+from ai_agents.agents.email_finder.graph import (
+    _no_website_fallback,
+    route_after_website_guess,
+)
+from ai_agents.agents.email_finder.io.contract_models import WebsiteGuessInput
+from ai_agents.agents.email_finder.state import CanonicalLead, Identity
+
+
+def _lead(**raw):
+    return CanonicalLead(identity=Identity(host_name="Stan Phelps"), raw=raw)
+
+
+def test_build_context_skips_source_noise_and_urls() -> None:
+    inp = WebsiteGuessInput(
+        lead=_lead(**{"Speaker Description": "CX keynote speaker", "Asset Value": "267",
+                      "Img": "https://x/y.jpg", "_dedup": "k"}),
+        trace_id="", source="e-speakers.com",
+    )
+    ctx = wg._build_context(inp, "Stan Phelps")
+    assert "Speaker Description: CX keynote speaker" in ctx
+    assert "e-speakers.com" not in ctx      # source must NOT leak in (it suppresses guesses)
+    assert "Asset Value" not in ctx          # noise skipped
+    assert "Img" not in ctx                  # url-valued / noise skipped
+
+
+def _run_with_guess(monkeypatch, website, confidence):
+    monkeypatch.setattr(wg, "_guess", lambda name, ctx, tid: (website, confidence))
+    out = wg.website_guesser_run(WebsiteGuessInput(lead=_lead(Bio="x"), trace_id="", source=None))
+    return out.lead
+
+
+def test_guesser_accepts_confident_nonsocial(monkeypatch) -> None:
+    lead = _run_with_guess(monkeypatch, "https://www.stanphelps.com", 0.9)
+    assert lead.website == "https://www.stanphelps.com"
+    assert lead.raw.get("_website_source") == "llm_guess"
+
+
+def test_guesser_rejects_low_confidence(monkeypatch) -> None:
+    assert _run_with_guess(monkeypatch, "https://site.com", 0.5).website is None
+
+
+def test_guesser_rejects_social(monkeypatch) -> None:
+    assert _run_with_guess(monkeypatch, "https://www.linkedin.com/in/x", 0.95).website is None
+
+
+def test_guesser_abstains_on_null(monkeypatch) -> None:
+    assert _run_with_guess(monkeypatch, None, 0.0).website is None
+
+
+def test_route_after_website_guess() -> None:
+    assert route_after_website_guess({"lead": {"website": "https://s.com"}}) == "discover_urls"
+    assert route_after_website_guess({"lead": {}}) == "perplexity_discovery"
+
+
+def test_no_website_fallback_runs_guesser_once() -> None:
+    # no website, guesser not yet run → guess first
+    assert _no_website_fallback({"lead": {}, "nodes_executed": ["canonical_builder"]}) == "website_guesser"
+    # guesser already ran → straight to perplexity (no loop)
+    assert _no_website_fallback({"lead": {}, "nodes_executed": ["website_guesser"]}) == "perplexity_discovery"
+    # already has a website → perplexity (shouldn't re-guess)
+    assert _no_website_fallback({"lead": {"website": "https://s.com"}, "nodes_executed": []}) == "perplexity_discovery"

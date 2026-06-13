@@ -196,6 +196,8 @@ def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
             email_candidates=inp.prior_email_candidates,
         )
         available_info = _build_query(ef_state)
+        if inp.source:
+            available_info += f"\nListed on: {inp.source}"
 
         filled_prompt = get_prompt(
             "perplexity_email_discovery",

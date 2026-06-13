@@ -24,6 +24,9 @@ from ai_agents.agents.email_finder.nodes.url_discovery import discover_urls_node
 from ai_agents.agents.email_finder.nodes.validate_existing_email import (
     validate_existing_email_node_async,
 )
+from ai_agents.agents.email_finder.nodes.website_guesser import (
+    website_guesser_node_async,
+)
 from ai_agents.agents.email_finder.nodes.youtube_about_enricher import (
     youtube_about_enricher_node_async,
 )
@@ -57,6 +60,20 @@ def _youtube_enabled(state: EmailFinderGraphState) -> bool:
     return False
 
 
+def _no_website_fallback(state: EmailFinderGraphState) -> str:
+    """
+    When there's no website to crawl, try the cheap LLM website_guesser before
+    paying for Perplexity's research mode — but only once per lead (guarded on
+    nodes_executed to avoid loops).
+    """
+    lead = state.get("lead") or {}
+    website = lead.get("website")
+    already_guessed = "website_guesser" in (state.get("nodes_executed") or [])
+    if not (website and str(website).strip()) and not already_guessed:
+        return "website_guesser"
+    return "perplexity_discovery"
+
+
 def route_after_canonical(state: EmailFinderGraphState) -> str:
     lead = state.get("lead") or {}
     existing_email = lead.get("existing_email")
@@ -73,7 +90,7 @@ def route_after_canonical(state: EmailFinderGraphState) -> str:
         # (and socials), then the enricher routes into the normal flow.
         return "youtube_about_enricher"
     else:
-        return "perplexity_discovery"
+        return _no_website_fallback(state)
 
 
 def route_after_validate(state: EmailFinderGraphState) -> str:
@@ -84,7 +101,7 @@ def route_after_validate(state: EmailFinderGraphState) -> str:
         return "discover_urls"
     if _youtube_enabled(state):
         return "youtube_about_enricher"
-    return "perplexity_discovery"
+    return _no_website_fallback(state)
 
 
 def route_after_discover(state: EmailFinderGraphState) -> str | list[Send]:
@@ -139,7 +156,15 @@ def route_after_youtube_enrich(state: EmailFinderGraphState) -> str:
     w = (state.get("lead") or {}).get("website")
     if w and str(w).strip():
         return "discover_urls"
-    # Otherwise hand off to Perplexity with the enriched socials/discovery_urls.
+    # Otherwise try the cheap website guess, then Perplexity.
+    return _no_website_fallback(state)
+
+
+def route_after_website_guess(state: EmailFinderGraphState) -> str:
+    # The model knew a website → crawl it for free. Otherwise → Perplexity.
+    w = (state.get("lead") or {}).get("website")
+    if w and str(w).strip():
+        return "discover_urls"
     return "perplexity_discovery"
 
 
@@ -157,6 +182,7 @@ def build_graph() -> StateGraph:
     graph.add_node("perplexity_discovery", perplexity_discovery_node_async)
     graph.add_node("fb_crawler", fb_crawler_node_async)
     graph.add_node("youtube_about_enricher", youtube_about_enricher_node_async)
+    graph.add_node("website_guesser", website_guesser_node_async)
 
     graph.set_entry_point("canonical_builder")
 
@@ -167,6 +193,7 @@ def build_graph() -> StateGraph:
             "validate_existing_email": "validate_existing_email",
             "discover_urls": "discover_urls",
             "youtube_about_enricher": "youtube_about_enricher",
+            "website_guesser": "website_guesser",
             "perplexity_discovery": "perplexity_discovery",
         },
     )
@@ -178,6 +205,7 @@ def build_graph() -> StateGraph:
             END: END,
             "discover_urls": "discover_urls",
             "youtube_about_enricher": "youtube_about_enricher",
+            "website_guesser": "website_guesser",
             "perplexity_discovery": "perplexity_discovery",
         },
     )
@@ -218,6 +246,16 @@ def build_graph() -> StateGraph:
         {
             END: END,
             "discover_urls": "discover_urls",
+            "website_guesser": "website_guesser",
+            "perplexity_discovery": "perplexity_discovery",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "website_guesser",
+        route_after_website_guess,
+        {
+            "discover_urls": "discover_urls",
             "perplexity_discovery": "perplexity_discovery",
         },
     )
@@ -234,6 +272,7 @@ def run_single(
     raw_row: dict[str, Any],
     source_type: SourceType,
     youtube_list: bool = False,
+    source: str | None = None,
 ) -> dict[str, Any]:
     """
     Run the graph for a single lead.
@@ -241,6 +280,8 @@ def run_single(
 
     youtube_list: enable the ScrapingBee youtube_about_enricher node (for lists
         known to be YouTube channels). Only fires when the lead has a YouTube URL.
+    source: provenance label (e.g. "speakerhub.com", "youtube api tool") used as
+        extra context for the website_guesser and Perplexity.
     """
     graph = build_graph()
 
@@ -252,6 +293,7 @@ def run_single(
                 if isinstance(source_type, SourceType)
                 else source_type,
                 "youtube_list": youtube_list,
+                "source": source,
             }
         )
 
@@ -274,14 +316,15 @@ async def run_single_async(
     index: int = 0,
     total: int = 0,
     youtube_list: bool = False,
+    source: str | None = None,
 ) -> dict[str, Any]:
     """Run a single lead through the graph with semaphore rate limiting."""
-    label = raw_row.get("Guest Name") or raw_row.get("Host Name") or raw_row.get("Podcast Name") or raw_row.get("Channel Name") or f"row-{index}"
+    label = raw_row.get("Guest Name") or raw_row.get("Host Name") or raw_row.get("Podcast Name") or raw_row.get("Channel Name") or raw_row.get("Name") or raw_row.get("Speaker Name") or f"row-{index}"
     async with semaphore:
         print(f"  [{index}/{total}] Starting: {label}")
         st_val = source_type.value if isinstance(source_type, SourceType) else source_type
         result = await graph.ainvoke(
-            {"raw_row": raw_row, "source_type": st_val, "youtube_list": youtube_list}
+            {"raw_row": raw_row, "source_type": st_val, "youtube_list": youtube_list, "source": source}
         )
         status = result.get("status", "?")
         nodes = result.get("nodes_executed") or []
@@ -299,6 +342,7 @@ async def run_batch_async(
     source_type: SourceType,
     concurrency: int = 3,
     youtube_list: bool = False,
+    source: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Run multiple leads concurrently.
@@ -309,7 +353,7 @@ async def run_batch_async(
     total = len(rows)
 
     tasks = [
-        run_single_async(graph, row, source_type, semaphore, i + 1, total, youtube_list)
+        run_single_async(graph, row, source_type, semaphore, i + 1, total, youtube_list, source)
         for i, row in enumerate(rows)
     ]
 
@@ -335,13 +379,14 @@ def run_batch(
     source_type: SourceType,
     concurrency: int = 3,
     youtube_list: bool = False,
+    source: str | None = None,
 ) -> list[dict[str, Any]]:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             nest_asyncio.apply()
-        return asyncio.run(run_batch_async(rows, source_type, concurrency, youtube_list))
+        return asyncio.run(run_batch_async(rows, source_type, concurrency, youtube_list, source))
     except RuntimeError:
         return asyncio.get_event_loop().run_until_complete(
-            run_batch_async(rows, source_type, concurrency, youtube_list)
+            run_batch_async(rows, source_type, concurrency, youtube_list, source)
         )

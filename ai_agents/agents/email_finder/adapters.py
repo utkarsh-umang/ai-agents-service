@@ -12,6 +12,7 @@ from ai_agents.agents.email_finder.io.contract_models import (
     PerplexityInput,
     ResolveInput,
     ValidateEmailInput,
+    WebsiteGuessInput,
     YouTubeEnrichInput,
 )
 from ai_agents.agents.email_finder.state import CanonicalLead, EmailCandidate, SourceType
@@ -67,6 +68,7 @@ def perplexity_input_from_state(state: dict[str, Any]) -> PerplexityInput:
         lead=parse_canonical_lead(state["lead"]),
         trace_id=state.get("trace_id", ""),
         prior_email_candidates=parse_email_candidates(prior),
+        source=state.get("source"),
     )
 
 
@@ -74,6 +76,14 @@ def youtube_enrich_input_from_state(state: dict[str, Any]) -> YouTubeEnrichInput
     return YouTubeEnrichInput(
         lead=parse_canonical_lead(state["lead"]),
         trace_id=state.get("trace_id", ""),
+    )
+
+
+def website_guess_input_from_state(state: dict[str, Any]) -> WebsiteGuessInput:
+    return WebsiteGuessInput(
+        lead=parse_canonical_lead(state["lead"]),
+        trace_id=state.get("trace_id", ""),
+        source=state.get("source"),
     )
 
 

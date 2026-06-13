@@ -21,6 +21,10 @@ class EmailFinderGraphState(TypedDict, total=False):
     # lead actually having a YouTube URL. Defaults to False when absent.
     youtube_list: NotRequired[bool]
 
+    # Provenance of the lead list (e.g. "speakerhub.com", "youtube api tool"),
+    # passed as context to website_guesser and Perplexity. Optional.
+    source: NotRequired[str]
+
     # Propagated observability
     trace_id: NotRequired[str]
 
