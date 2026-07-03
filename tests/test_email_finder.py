@@ -323,3 +323,106 @@ def test_routing_email_derived_website_validates_first() -> None:
     # a real website alongside an existing email still crawls first (unchanged)
     real = {"existing_email": "jane@acme.com", "website": "https://acme.com", "raw": {}}
     assert route_after_canonical({"lead": real}) == "discover_urls"
+
+
+# ── cost_mode flag + terminal fallback (control plane) ────────────────────────
+
+from ai_agents.agents.email_finder.graph import (
+    _terminal_fallback,
+    _has_discovery_urls,
+    route_after_bio_links,
+)
+
+
+def test_terminal_fallback_respects_cost_mode() -> None:
+    assert _terminal_fallback({}) == "perplexity_discovery"                    # absent → high
+    assert _terminal_fallback({"cost_mode": "high"}) == "perplexity_discovery"
+    assert _terminal_fallback({"cost_mode": "low"}) == END                     # skip the paid node
+
+
+def test_website_guess_low_cost_ends() -> None:
+    # low-cost: no site guessed → END instead of paying for Perplexity
+    assert route_after_website_guess({"lead": {}, "cost_mode": "low"}) == END
+    assert route_after_website_guess({"lead": {}, "cost_mode": "high"}) == "perplexity_discovery"
+    # a guessed site still crawls in both modes
+    assert route_after_website_guess({"lead": {"website": "https://s.com"}, "cost_mode": "low"}) == "discover_urls"
+
+
+# ── bio-link resolver routing (Locators) ──────────────────────────────────────
+
+
+def test_has_discovery_urls() -> None:
+    assert _has_discovery_urls({"discovery_urls": ["https://linktr.ee/x"]}) is True
+    assert _has_discovery_urls({"discovery_urls": ["  "]}) is False
+    assert _has_discovery_urls({"discovery_urls": []}) is False
+    assert _has_discovery_urls({}) is False
+
+
+def test_no_website_fallback_prefers_bio_links() -> None:
+    lead = {"discovery_urls": ["https://linktr.ee/jane"]}
+    # free bio-link resolution runs before the cheap guesser
+    assert _no_website_fallback({"lead": lead, "nodes_executed": ["canonical_builder"]}) == "resolve_bio_links"
+    # already resolved → fall through to the guesser
+    assert _no_website_fallback({"lead": lead, "nodes_executed": ["resolve_bio_links"]}) == "website_guesser"
+    # resolved + guessed, low-cost → END (no paid research)
+    assert _no_website_fallback(
+        {"lead": lead, "nodes_executed": ["resolve_bio_links", "website_guesser"], "cost_mode": "low"}
+    ) == END
+
+
+def test_route_after_bio_links() -> None:
+    # resolved a website → crawl it
+    assert route_after_bio_links({"lead": {"website": "https://jane.com/"}}) == "discover_urls"
+    # only harvested aggregator-page emails → resolve them
+    assert route_after_bio_links({"lead": {}, "website_scrape_candidates": [{"email": "a@b.com"}]}) == "resolve_best_email"
+    # nothing found → continue the no-website chain (bio already ran → guesser)
+    assert route_after_bio_links(
+        {"lead": {"discovery_urls": ["https://linktr.ee/x"]}, "nodes_executed": ["resolve_bio_links"]}
+    ) == "website_guesser"
+    # a plaintext email was found → done
+    assert route_after_bio_links({"status": LeadStatus.EMAIL_FOUND.value, "lead": {}}) == END
+
+
+# ── link_resolver helpers (Locators / free hop-resolution) ────────────────────
+
+from ai_agents.agents.email_finder.nodes.link_resolver import (
+    _bucket,
+    _clean_emails,
+    _name_related,
+    _name_tokens,
+    _reg_domain,
+    _root_url,
+)
+
+
+def test_reg_domain_dependency_free() -> None:
+    assert _reg_domain("https://www.chloeting.com/program") == "chloeting.com"
+    assert _reg_domain("https://foo.co.uk/x") == "foo.co.uk"
+    assert _reg_domain("https://a.b.example.com") == "example.com"
+
+
+def test_bucket_classifies_urls() -> None:
+    assert _bucket("https://linktr.ee/jane") == "agg"
+    assert _bucket("https://bit.ly/abc") == "short"
+    assert _bucket("https://x.com/jane") == "social"
+    assert _bucket("https://ncs.io") == "thirdparty"
+    assert _bucket("https://amazon.com/dp/x") == "market"
+    assert _bucket("https://i.ytimg.com/x.jpg") == "infra"
+    assert _bucket("https://janedoe.com/") == "real"
+
+
+def test_root_url_normalizes_to_root() -> None:
+    assert _root_url("https://site.com/deep/page") == "https://site.com/"
+
+
+def test_name_related_prioritizes_own_domain() -> None:
+    toks = _name_tokens("Chloe Ting")
+    assert _name_related("https://chloeting.com/", toks) is True
+    assert _name_related("https://ncs.io/", toks) is False
+
+
+def test_clean_emails_drops_vendor_and_junk() -> None:
+    text = "reach jane@chloeting.com or noreply@sentry.io and a@schema.org plus x@example.com"
+    got = _clean_emails(text)
+    assert "jane@chloeting.com" in got
+    assert all(j not in got for j in ["noreply@sentry.io", "a@schema.org", "x@example.com"])

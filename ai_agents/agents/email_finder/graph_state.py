@@ -25,6 +25,11 @@ class EmailFinderGraphState(TypedDict, total=False):
     # passed as context to website_guesser and Perplexity. Optional.
     source: NotRequired[str]
 
+    # Cost policy for this run. "high" (default) runs the full cascade including
+    # the paid terminal research node (Perplexity). "low" runs every FREE/cheap
+    # step but ends as not-found instead of paying for research. Absent → "high".
+    cost_mode: NotRequired[str]
+
     # Propagated observability
     trace_id: NotRequired[str]
 
