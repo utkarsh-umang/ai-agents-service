@@ -57,6 +57,38 @@ def _is_valid_email(value: str) -> bool:
     return bool(re.match(pattern, value.strip()))
 
 
+# Public mailbox providers — their domain is NOT a personal/company website, so
+# we never derive a website from an email hosted at one of these.
+_FREE_EMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com", "googlemail.com",
+        "yahoo.com", "yahoo.co.uk", "yahoo.co.in", "ymail.com", "rocketmail.com",
+        "hotmail.com", "hotmail.co.uk", "outlook.com", "live.com", "msn.com",
+        "icloud.com", "me.com", "mac.com",
+        "aol.com", "gmx.com", "gmx.net", "mail.com", "zoho.com",
+        "proton.me", "protonmail.com", "pm.me",
+        "yandex.com", "fastmail.com", "hey.com", "hushmail.com", "tutanota.com",
+    }
+)
+
+
+def _website_from_email(email: str | None) -> str | None:
+    """
+    Derive a likely website from an email's domain when no website was given
+    (jane@acme.com -> https://acme.com). Returns None for free/public mailbox
+    providers (gmail, outlook, ...) whose domain is not the person's site, and
+    for malformed input.
+    """
+    if not email or "@" not in email:
+        return None
+    domain = email.rsplit("@", 1)[-1].strip().lower().strip(".")
+    if not domain or "." not in domain:
+        return None
+    if domain in _FREE_EMAIL_DOMAINS:
+        return None
+    return f"https://{domain}"
+
+
 def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> dict:
     """Use LiteLLM + OpenAI to classify raw row fields."""
     filled_prompt = get_prompt(
@@ -103,6 +135,16 @@ def _build_from_llm_output(
         else:
             existing_email = None
 
+    # If no website was given but we have a usable (non-free-provider) email,
+    # derive the website from its domain so the free crawl path has a domain to
+    # work with. Tagged in raw for provenance; routing treats an email-derived
+    # website as a fallback — validation of the existing email still runs first
+    # (see route_after_canonical), so a good existing email is never bypassed.
+    if not website and existing_email:
+        derived = _website_from_email(existing_email)
+        if derived:
+            website = derived
+            raw_row = {**raw_row, "_website_source": "email_domain"}
 
     # Collect discovery URLs (linktr.ee, beacons.ai, carrd.co, etc.)
     # Strip tracking params and reject any that are social platform URLs

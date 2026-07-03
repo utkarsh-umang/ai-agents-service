@@ -74,15 +74,28 @@ def _no_website_fallback(state: EmailFinderGraphState) -> str:
     return "perplexity_discovery"
 
 
+def _website_is_email_derived(lead: dict) -> bool:
+    """True when `lead.website` was synthesized from the existing email's domain
+    (canonical_builder), not a real website found on the row. Such a website is a
+    fallback crawl target, not a reason to skip validating the existing email."""
+    return (lead.get("raw") or {}).get("_website_source") == "email_domain"
+
+
 def route_after_canonical(state: EmailFinderGraphState) -> str:
     lead = state.get("lead") or {}
     existing_email = lead.get("existing_email")
     website = lead.get("website")
+    has_email = bool(existing_email and str(existing_email).strip())
+    has_website = bool(website and str(website).strip())
+    # A website derived from the email domain must NOT preempt validation of the
+    # existing email — validate first, then route_after_validate falls back to
+    # crawling the derived domain if the email turns out bad.
+    real_website = has_website and not _website_is_email_derived(lead)
 
-    # Only validate-and-exit if we have an email AND no website to improve on
-    if existing_email and str(existing_email).strip() and not (website and str(website).strip()):
+    # Validate-and-exit when we have an email and no real website to improve on
+    if has_email and not real_website:
         return "validate_existing_email"
-    elif website and str(website).strip():
+    elif has_website:
         # Website crawl takes priority — user-chosen ordering.
         return "discover_urls"
     elif _youtube_enabled(state):

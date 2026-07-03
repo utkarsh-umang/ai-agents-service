@@ -266,3 +266,60 @@ def test_no_website_fallback_runs_guesser_once() -> None:
     assert _no_website_fallback({"lead": {}, "nodes_executed": ["website_guesser"]}) == "perplexity_discovery"
     # already has a website → perplexity (shouldn't re-guess)
     assert _no_website_fallback({"lead": {"website": "https://s.com"}, "nodes_executed": []}) == "perplexity_discovery"
+
+
+# ── derive website from email domain (canonical_builder) ──────────────────────
+
+from ai_agents.agents.email_finder.nodes.canonical_builder import (
+    _website_from_email,
+    _build_from_llm_output,
+)
+from ai_agents.agents.email_finder.state import SourceType
+
+
+def test_website_from_email_company_domain() -> None:
+    assert _website_from_email("jane@acme.com") == "https://acme.com"
+    # case-normalised, subdomain + multi-part TLD preserved
+    assert _website_from_email("a.b+x@Sub.Acme.CO.UK") == "https://sub.acme.co.uk"
+
+
+def test_website_from_email_skips_free_and_malformed() -> None:
+    for e in ["jane@gmail.com", "x@outlook.com", "y@icloud.com", "z@proton.me",
+              "notanemail", "@nodomain", "a@b", "", None]:
+        assert _website_from_email(e) is None
+
+
+def test_build_derives_website_from_email_when_missing() -> None:
+    out = _build_from_llm_output(
+        {"host_name": "Jane", "existing_email": "jane@acme.com"},  # no website
+        SourceType.OTHER, {"Name": "Jane"},
+    )
+    assert out.website == "https://acme.com"
+    assert out.raw.get("_website_source") == "email_domain"  # provenance tagged
+
+
+def test_build_does_not_override_real_website() -> None:
+    out = _build_from_llm_output(
+        {"host_name": "Jane", "website": "https://real.com", "existing_email": "jane@acme.com"},
+        SourceType.OTHER, {},
+    )
+    assert out.website == "https://real.com"
+    assert out.raw.get("_website_source") is None
+
+
+def test_build_skips_free_provider_email() -> None:
+    out = _build_from_llm_output(
+        {"host_name": "Jane", "existing_email": "jane@gmail.com"},
+        SourceType.OTHER, {},
+    )
+    assert out.website is None
+
+
+def test_routing_email_derived_website_validates_first() -> None:
+    # derived website must NOT preempt validation of the existing email
+    derived = {"existing_email": "jane@acme.com", "website": "https://acme.com",
+               "raw": {"_website_source": "email_domain"}}
+    assert route_after_canonical({"lead": derived}) == "validate_existing_email"
+    # a real website alongside an existing email still crawls first (unchanged)
+    real = {"existing_email": "jane@acme.com", "website": "https://acme.com", "raw": {}}
+    assert route_after_canonical({"lead": real}) == "discover_urls"
