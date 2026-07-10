@@ -4,23 +4,26 @@ Only ``run_thumbnail_agent`` is supported as public API. Subpackages and
 modules such as ``agents``, ``generator``, ``gpt_image_generator``, and
 ``prompts`` are internal implementation details and are not re-exported here.
 
-Required environment variables (validated on import): ``OPENAI_API_KEY``,
-``GEMINI_API_KEY``. See ``.env.example``.
+Required environment variables (validated on import): ``OPENAI_API_KEY``.
+Also used, but not enforced at import time (raised lazily on first call):
+``GEMINI_API_KEY`` (or ``GOOGLE_API_KEY``), ``BFL_API_KEY``. See ``.env.example``.
 
-**Signature** (``model`` is the literal ``"gptimage"`` or ``"nanobanana"``)::
+**Signature** (``model`` is the literal ``"gptimage"``, ``"nanobanana"``, or ``"fluxkontext"``)::
 
     def run_thumbnail_agent(
-        model: Literal["gptimage", "nanobanana"],
+        model: Literal["gptimage", "nanobanana", "fluxkontext"],
         reference_image_url: str,
         base_image_urls: list[str],
         title: str,
         include_title: bool,
         creative_comments: str,
         shorts_or_reels: bool = False,
+        num_candidates: int = 1,
     ) -> dict[str, object]:
         ...
 
-**Return value:** a dict with ``image_bytes`` (``bytes``) and ``prompt_used`` (``str``).
+**Return value:** a dict with ``images`` (``list[bytes]``, length ``num_candidates``)
+and ``prompt_used`` (``str``).
 """
 
 from __future__ import annotations

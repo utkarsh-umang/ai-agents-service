@@ -49,8 +49,10 @@ def generate_with_gpt_image(
     include_title: bool,
     creative_comments: str,
     shorts_or_reels: bool = False,
-    model: str = "gpt-image-1",
-    input_fidelity: Literal["high", "low"] = "high",
+    model: str = "gpt-image-2",
+    # gpt-image-1 supports `input_fidelity`; gpt-image-2 rejects it outright
+    # (HTTP 400 invalid_input_fidelity_model) — only pass it for gpt-image-1.
+    input_fidelity: Literal["high", "low"] | None = "high",
 ) -> tuple[bytes, str]:
     """
     True image-conditioned generation via ``images.edit``.
@@ -72,17 +74,20 @@ def generate_with_gpt_image(
             (_filename_for_mime(mime, i + 1, "base"), raw, mime),
         )
 
-    client = OpenAI()
-    response = client.images.edit(
+    edit_kwargs: dict[str, object] = dict(
         model=model,
         image=files,
         prompt=prompt,
         size=size,
-        input_fidelity=input_fidelity,
         quality="high",
         output_format="png",
         n=1,
     )
+    if not model.startswith("gpt-image-2") and input_fidelity is not None:
+        edit_kwargs["input_fidelity"] = input_fidelity
+
+    client = OpenAI()
+    response = client.images.edit(**edit_kwargs)
 
     if not response.data or not response.data[0].b64_json:
         raise ValueError("GPT Image returned no image (expected b64_json)")

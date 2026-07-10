@@ -34,7 +34,7 @@ def generate_with_nanobanana(
     include_title: bool,
     creative_comments: str,
     shorts_or_reels: bool = False,
-    model_variant: str = "gemini-3.1-flash-image-preview",
+    model_variant: str = "gemini-3-pro-image-preview",
 ) -> bytes:
     """
     Generate a thumbnail via Gemini image output. Returns raw image bytes.

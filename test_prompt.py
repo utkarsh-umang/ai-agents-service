@@ -26,9 +26,12 @@ result = run_thumbnail_agent(
     creative_comments="Strong focal point, energetic but mainstream YouTube style",
 )
 
-raw = result["image_bytes"]
+images = result["images"]
+if not isinstance(images, list) or not images:
+    raise TypeError("Expected images to be a non-empty list")
+raw = images[0]
 if not isinstance(raw, (bytes, bytearray)):
-    raise TypeError("Expected image_bytes to be bytes")
+    raise TypeError("Expected images[0] to be bytes")
 out_path = "output_thumbnail.png"
 with open(out_path, "wb") as f:
     f.write(bytes(raw))
