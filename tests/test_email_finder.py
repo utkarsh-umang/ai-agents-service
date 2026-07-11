@@ -58,3 +58,42 @@ def test_build_scrape_plan_home_first() -> None:
     )
     assert plan[0] == home
     assert len(plan) == 3
+
+
+# ── cost_mode routing (control plane) ────────────────────────────────────────
+
+
+def test_terminal_fallback_defaults_to_paid_research() -> None:
+    from langgraph.graph import END
+
+    from ai_agents.agents.email_finder.graph import _terminal_fallback
+
+    # Missing key and explicit "high" both preserve pre-flag behavior.
+    assert _terminal_fallback({}) == "perplexity_discovery"
+    assert _terminal_fallback({"cost_mode": "high"}) == "perplexity_discovery"
+    assert _terminal_fallback({"cost_mode": "low"}) == END
+
+
+def test_route_after_canonical_low_cost_ends_without_website() -> None:
+    from langgraph.graph import END
+
+    from ai_agents.agents.email_finder.graph import route_after_canonical
+
+    no_website = {"lead": {"website": None}}
+    assert route_after_canonical({**no_website, "cost_mode": "low"}) == END
+    assert route_after_canonical({**no_website, "cost_mode": "high"}) == "perplexity_discovery"
+    # A website means free methods still have work to do, regardless of mode.
+    has_website = {"lead": {"website": "https://example.com"}, "cost_mode": "low"}
+    assert route_after_canonical(has_website) == "discover_urls"
+
+
+def test_route_after_resolve_low_cost_ends_instead_of_escalating() -> None:
+    from langgraph.graph import END
+
+    from ai_agents.agents.email_finder.graph import route_after_resolve
+    from ai_agents.agents.email_finder.state import LeadStatus
+
+    found = {"status": LeadStatus.EMAIL_FOUND.value}
+    assert route_after_resolve(found) == END  # found: done in any mode
+    assert route_after_resolve({"status": "pending", "cost_mode": "low"}) == END
+    assert route_after_resolve({"status": "pending"}) == "perplexity_discovery"

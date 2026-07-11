@@ -31,12 +31,20 @@ def run_canonical_builder(state: EmailFinderGraphState) -> dict[str, Any]:
     return canonical_builder_to_graph_dict(state["raw_row"], st)
 
 
+def _terminal_fallback(state: EmailFinderGraphState) -> str:
+    """Where to go when free methods are exhausted. cost_mode == "low" ends
+    the run as not-found instead of paying for research; anything else
+    (including the key being absent) escalates to Perplexity — the default
+    is exactly the pre-flag behavior."""
+    return END if state.get("cost_mode") == "low" else "perplexity_discovery"
+
+
 def route_after_canonical(state: EmailFinderGraphState) -> str:
     lead = state.get("lead") or {}
     w = lead.get("website")
     if w and str(w).strip():
         return "discover_urls"
-    return "perplexity_discovery"
+    return _terminal_fallback(state)
 
 
 def route_after_discover(state: EmailFinderGraphState) -> str | list[Send]:
@@ -62,7 +70,7 @@ def route_after_discover(state: EmailFinderGraphState) -> str | list[Send]:
 def route_after_resolve(state: EmailFinderGraphState) -> str:
     if state.get("status") == LeadStatus.EMAIL_FOUND.value:
         return END
-    return "perplexity_discovery"
+    return _terminal_fallback(state)
 
 
 # ── Graph definition ─────────────────────────────────────────────────────────
@@ -85,6 +93,7 @@ def build_graph() -> StateGraph:
         {
             "discover_urls": "discover_urls",
             "perplexity_discovery": "perplexity_discovery",
+            END: END,  # cost_mode="low" with no website: stop, don't pay
         },
     )
 
@@ -116,7 +125,11 @@ def build_graph() -> StateGraph:
 # ── Single lead runner ────────────────────────────────────────────────────────
 
 
-def run_single(raw_row: dict[str, Any], source_type: SourceType) -> dict[str, Any]:
+def run_single(
+    raw_row: dict[str, Any],
+    source_type: SourceType,
+    cost_mode: str = "high",
+) -> dict[str, Any]:
     """
     Run the graph for a single lead.
     Returns the final state as a dict.
@@ -130,6 +143,7 @@ def run_single(raw_row: dict[str, Any], source_type: SourceType) -> dict[str, An
                 "source_type": source_type.value
                 if isinstance(source_type, SourceType)
                 else source_type,
+                "cost_mode": cost_mode,
             }
         )
 
@@ -149,17 +163,21 @@ async def run_single_async(
     raw_row: dict[str, Any],
     source_type: SourceType,
     semaphore: asyncio.Semaphore,
+    cost_mode: str = "high",
 ) -> dict[str, Any]:
     """Run a single lead through the graph with semaphore rate limiting."""
     async with semaphore:
         st_val = source_type.value if isinstance(source_type, SourceType) else source_type
-        return await graph.ainvoke({"raw_row": raw_row, "source_type": st_val})
+        return await graph.ainvoke(
+            {"raw_row": raw_row, "source_type": st_val, "cost_mode": cost_mode}
+        )
 
 
 async def run_batch_async(
     rows: list[dict[str, Any]],
     source_type: SourceType,
     concurrency: int = 3,
+    cost_mode: str = "high",
 ) -> list[dict[str, Any]]:
     """
     Run multiple leads concurrently.
@@ -169,7 +187,7 @@ async def run_batch_async(
     semaphore = asyncio.Semaphore(concurrency)
 
     tasks = [
-        run_single_async(graph, row, source_type, semaphore)
+        run_single_async(graph, row, source_type, semaphore, cost_mode)
         for row in rows
     ]
 
@@ -193,13 +211,14 @@ def run_batch(
     rows: list[dict[str, Any]],
     source_type: SourceType,
     concurrency: int = 3,
+    cost_mode: str = "high",
 ) -> list[dict[str, Any]]:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             nest_asyncio.apply()
-        return asyncio.run(run_batch_async(rows, source_type, concurrency))
+        return asyncio.run(run_batch_async(rows, source_type, concurrency, cost_mode))
     except RuntimeError:
         return asyncio.get_event_loop().run_until_complete(
-            run_batch_async(rows, source_type, concurrency)
+            run_batch_async(rows, source_type, concurrency, cost_mode)
         )

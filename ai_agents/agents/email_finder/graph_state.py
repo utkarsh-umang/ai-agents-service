@@ -16,6 +16,12 @@ class EmailFinderGraphState(TypedDict, total=False):
     raw_row: dict[str, Any]
     source_type: str
 
+    # Cost policy: "high" (default) escalates to paid research (Perplexity)
+    # when free methods are dry; "low" ends as not-found instead. Only the
+    # control plane's routing reads this — no paid call outside Research
+    # Escalation.
+    cost_mode: NotRequired[str]
+
     # Propagated observability
     trace_id: NotRequired[str]
 
