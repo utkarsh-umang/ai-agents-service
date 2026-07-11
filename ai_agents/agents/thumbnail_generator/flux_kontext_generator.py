@@ -6,6 +6,15 @@ photo (the identity to preserve); ``input_image_2`` (Kontext's multiref slot,
 flagged experimental by BFL) carries the style reference when a subject photo
 is present. Only the first base image is used — Kontext takes discrete named
 image slots, not a list, so multiple base images aren't supported here.
+
+Kontext is fundamentally an EDIT model (targeted, local changes to
+``input_image``), not a from-scratch generator like GPT Image or Nano Banana —
+it does not respond well to the long descriptive system-prompt style shared
+with those two models. Empirically (see prod incident: title text rendered
+garbled, e.g. "STETM DESGN TURS", and restyling was weak/timid), a short,
+direct, imperative edit instruction produces correct text and a much stronger
+style transfer. Keep this prompt builder short and imperative; do not swap
+back to ``build_thumbnail_system_prompt``/``build_user_instruction``.
 """
 
 from __future__ import annotations
@@ -16,10 +25,6 @@ import time
 
 import httpx
 
-from ai_agents.agents.thumbnail_generator.prompts import (
-    build_thumbnail_system_prompt,
-    build_user_instruction,
-)
 from ai_agents.agents.thumbnail_generator.utils import fetch_and_encode
 
 _SUBMIT_URL = "https://api.bfl.ai/v1/flux-kontext-pro"
@@ -42,19 +47,38 @@ def _build_prompt(
     shorts_or_reels: bool,
     has_base_image: bool,
 ) -> str:
-    system = build_thumbnail_system_prompt(shorts_or_reels)
-    user_part = build_user_instruction(title, include_title, creative_comments, shorts_or_reels)
+    parts: list[str] = []
+
     if has_base_image:
-        image_note = (
-            "You are editing IMAGE 1 (the subject) to match the visual style of "
-            "IMAGE 2 (the reference thumbnail)."
+        parts.append(
+            "Transform this photo into a viral, high-CTR YouTube thumbnail (MrBeast-style). "
+            "Apply the visual style of the second reference image exactly: matching color "
+            "grading, lighting mood, and composition energy."
         )
     else:
-        image_note = (
-            "IMAGE 1 is the reference thumbnail. Invent a subject matching the "
-            "creative direction below, in the reference's exact style."
+        parts.append(
+            "Transform this reference photo into a viral, high-CTR YouTube thumbnail "
+            "(MrBeast-style)."
         )
-    return f"{system}\n\n{image_note}\n\n{user_part}"
+    parts.append(
+        "Make the lighting cinematic and high-contrast, boost color saturation, blur the "
+        "background, and keep the subject sharp and centered."
+    )
+    if shorts_or_reels:
+        parts.append("Compose for a vertical 9:16 portrait frame, not landscape.")
+
+    if include_title and title:
+        parts.append(
+            f'Add bold, thick, high-contrast text at the top reading "{title.upper()}" '
+            "(yellow, white, or red), easy to read on mobile, not covering the subject's face."
+        )
+    else:
+        parts.append("Do not add any text.")
+
+    if creative_comments:
+        parts.append(f"Additional direction: {creative_comments}")
+
+    return " ".join(parts)
 
 
 def generate_with_flux_kontext(
