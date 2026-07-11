@@ -1,17 +1,29 @@
-"""Pull worker: drains LMS's enrichment queue through the email finder.
+"""Persistent enrichment worker: drains LMS's email queue via the email
+finder, driven by long-polling — no idle chatter, instant pickup.
 
-LMS owns the ledger (enrichment_attempts) and derives the queue from it;
-this worker just pulls a page of leads, runs the finder at the requested
-cost tier, and posts one result per lead back. Crash-safe by design: a
-lead only leaves the queue when its result row lands, so a killed worker
-re-does at most one in-flight page, and nothing is ever attempted twice
-at the same tier.
+The loop is a single blocking call from the worker's point of view:
+`GET /enrichment/queue/wait` holds until work exists (or ~55s timeout,
+then we immediately re-call). LMS wakes held requests the moment an
+ingestion commits. While the human-in-the-loop gate is closed (pause),
+the same call simply keeps blocking — pressing Resume in the UI wakes it.
+
+Error taxonomy (the part that keeps automation trustworthy):
+- lead-level  — one lead's crawl/parse blew up → record status="failed",
+                move on. That lead is done at this tier.
+- transient   — LMS/network briefly unreachable → short local backoff,
+                nothing recorded, retry.
+- hard block  — LLM credits exhausted / invalid API key → record NOTHING
+                (leads stay queued), POST /pause, and wait for a human to
+                press Resume. Never a timed retry against an error that
+                cannot self-heal.
+
+Concurrency defaults (12 in flight, pages of 50) come straight from the
+proven `email-finder-youtube-19k-no-perplexity` notebook run — the same
+low-cost workload profile.
 
 Usage:
-    python scripts/lms_enrichment_worker.py                 # one page, low cost
-    python scripts/lms_enrichment_worker.py --loop          # poll until queue empty
-    python scripts/lms_enrichment_worker.py --cost-mode high --limit 5
-
+    python scripts/lms_enrichment_worker.py            # daemon (long-poll loop)
+    python scripts/lms_enrichment_worker.py --once     # drain once, then exit
 Env: LMS_API_URL (default http://localhost:8000)
 """
 from __future__ import annotations
@@ -31,11 +43,35 @@ from ai_agents.agents.email_finder.state import LeadStatus, SourceType  # noqa: 
 LMS_API = os.environ.get("LMS_API_URL", "http://localhost:8000").rstrip("/")
 PROVIDER = "email_finder@ai-agents-service"
 
+# Server holds /queue/wait up to this long; client must out-wait it.
+WAIT_TIMEOUT_S = 55.0
+CLIENT_TIMEOUT_S = 75.0
+TRANSIENT_BACKOFF_S = 20.0
+
+# Signatures of errors that can never self-heal — pausing for a human is
+# the only correct response. Matched against the exception's full repr.
+HARD_BLOCK_MARKERS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "invalid_api_key",
+    "incorrect api key",
+    "authenticationerror",
+    "billing",
+)
+
+
+class HardBlock(Exception):
+    """LLM provider says stop: quota/billing/key. Human required."""
+
+
+def _classify(exc: Exception) -> str:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if any(marker in text for marker in HARD_BLOCK_MARKERS):
+        return "hard_block"
+    return "lead_level"
+
 
 def _queue_item_to_raw_row(item: dict) -> dict:
-    """LMS canonical fields → the raw_row shape the finder's ingestion
-    (LLM-classified) consumes. Keys are human-readable on purpose — the
-    canonical_builder prompt reads them as a table row."""
     return {
         "channel_name": item.get("youtube_channel_name"),
         "youtube_handle": item.get("youtube_handle"),
@@ -51,7 +87,7 @@ def _queue_item_to_raw_row(item: dict) -> dict:
     }
 
 
-def _result_from_final_state(item: dict, state: dict, cost_mode: str) -> dict:
+def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
     best = state.get("best_email") or {}
     email = best.get("email") if isinstance(best, dict) else None
     found = state.get("status") == LeadStatus.EMAIL_FOUND.value and bool(email)
@@ -67,18 +103,26 @@ def _result_from_final_state(item: dict, state: dict, cost_mode: str) -> dict:
     }
 
 
-async def process_page(client: httpx.AsyncClient, cost_mode: str, limit: int, concurrency: int) -> int:
-    """Pull one page, run it, post results. Returns how many leads were processed."""
-    resp = await client.get(
-        f"{LMS_API}/api/v1/enrichment/queue",
-        params={"cost_mode": cost_mode, "limit": limit},
-    )
-    resp.raise_for_status()
-    items = resp.json()
-    if not items:
-        return 0
+async def _heartbeat(client: httpx.AsyncClient, state: str, detail: str | None = None, in_flight: int = 0) -> None:
+    try:
+        await client.post(
+            f"{LMS_API}/api/v1/enrichment/heartbeat",
+            json={"state": state, "detail": detail, "in_flight": in_flight},
+        )
+    except httpx.HTTPError:
+        pass  # heartbeats are best-effort; the queue semantics don't depend on them
 
-    print(f"[worker] pulled {len(items)} leads (cost_mode={cost_mode})")
+
+async def _pause(client: httpx.AsyncClient, reason: str) -> None:
+    await client.post(f"{LMS_API}/api/v1/enrichment/pause", json={"reason": reason})
+
+
+async def process_page(
+    client: httpx.AsyncClient, items: list[dict], cost_mode: str, concurrency: int
+) -> None:
+    """Run one page through the finder and post results. Raises HardBlock
+    (after posting the page's legitimate results) if a systemic LLM error
+    is detected — the affected leads get nothing recorded and stay queued."""
     graph = build_graph()
     semaphore = asyncio.Semaphore(concurrency)
 
@@ -92,13 +136,19 @@ async def process_page(client: httpx.AsyncClient, cost_mode: str, limit: int, co
                 cost_mode=cost_mode,
             )
             return item, state
-        except Exception as exc:  # noqa: BLE001 — one bad lead must not sink the page
+        except Exception as exc:  # noqa: BLE001 — classified below, never swallowed
             return item, exc
 
-    results = await asyncio.gather(*(run_one(i) for i in items))
+    outcomes = await asyncio.gather(*(run_one(i) for i in items))
 
-    for item, outcome in results:
+    hard_block_reason: str | None = None
+    for item, outcome in outcomes:
         if isinstance(outcome, Exception):
+            kind = _classify(outcome)
+            if kind == "hard_block":
+                # Record nothing — this lead must stay in the queue.
+                hard_block_reason = f"{type(outcome).__name__}: {outcome}"
+                continue
             payload = {
                 "lead_id": item["lead_id"],
                 "type": "email",
@@ -107,32 +157,91 @@ async def process_page(client: httpx.AsyncClient, cost_mode: str, limit: int, co
                 "provider": PROVIDER,
             }
         else:
-            payload = _result_from_final_state(item, outcome, cost_mode)
-        post = await client.post(f"{LMS_API}/api/v1/enrichment/results", json=payload)
-        post.raise_for_status()
-        print(f"[worker]   {item.get('youtube_channel_name') or item['lead_id']}: {payload['status']}"
+            payload = _result_payload(item, outcome, cost_mode)
+        resp = await client.post(f"{LMS_API}/api/v1/enrichment/results", json=payload)
+        resp.raise_for_status()
+        label = item.get("youtube_channel_name") or item["lead_id"]
+        print(f"[worker]   {label}: {payload['status']}"
               + (f" -> {payload['value']}" if payload.get("value") else ""))
 
-    return len(items)
+    if hard_block_reason:
+        raise HardBlock(hard_block_reason)
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cost-mode", choices=["low", "high"], default="low")
-    parser.add_argument("--limit", type=int, default=10, help="leads per page")
-    parser.add_argument("--concurrency", type=int, default=3)
-    parser.add_argument("--loop", action="store_true", help="keep pulling until the queue is empty")
+    parser.add_argument("--limit", type=int, default=50, help="leads per page")
+    parser.add_argument("--concurrency", type=int, default=12)
+    parser.add_argument("--once", action="store_true", help="drain the current queue and exit")
+    parser.add_argument(
+        "--pages",
+        type=int,
+        default=None,
+        help="stop after N pages regardless of queue depth (use --pages 1 for a bounded test; "
+        "--once alone drains the ENTIRE queue)",
+    )
     args = parser.parse_args()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        total = 0
+    print(f"[worker] starting — LMS={LMS_API} cost_mode={args.cost_mode} "
+          f"page={args.limit} concurrency={args.concurrency} "
+          f"mode={'once' if args.once else 'daemon'}")
+
+    pages_done = 0
+    async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT_S) as client:
         while True:
-            n = await process_page(client, args.cost_mode, args.limit, args.concurrency)
-            total += n
-            if n == 0 or not args.loop:
-                break
-        print(f"[worker] done — {total} leads processed" + (", queue empty" if args.loop else ""))
+            if args.pages is not None and pages_done >= args.pages:
+                print(f"[worker] page limit ({args.pages}) reached — done")
+                return
+            try:
+                await _heartbeat(client, "waiting")
+                resp = await client.get(
+                    f"{LMS_API}/api/v1/enrichment/queue/wait",
+                    params={
+                        "cost_mode": args.cost_mode,
+                        "limit": args.limit,
+                        "timeout": WAIT_TIMEOUT_S,
+                    },
+                )
+                resp.raise_for_status()
+                items = resp.json()
+
+                if not items:
+                    if args.once:
+                        print("[worker] queue empty — done")
+                        return
+                    continue  # timeout tick or just-resumed; re-enter the wait
+
+                print(f"[worker] pulled {len(items)} leads")
+                await _heartbeat(client, "processing",
+                                 f"processing {len(items)} leads", len(items))
+                await process_page(client, items, args.cost_mode, args.concurrency)
+                pages_done += 1
+
+            except HardBlock as exc:
+                reason = f"Email finder paused: {exc}"
+                print(f"[worker] HARD BLOCK — {reason}")
+                try:
+                    await _pause(client, reason)
+                    await _heartbeat(client, "blocked", reason)
+                except httpx.HTTPError:
+                    pass
+                if args.once:
+                    sys.exit(2)
+                # No sleep needed: /queue/wait now blocks server-side until
+                # a human presses Resume. Just re-enter the loop.
+
+            except (httpx.HTTPError, OSError) as exc:
+                # LMS down / network blip — transient by definition here.
+                print(f"[worker] transient: {type(exc).__name__}: {exc} — "
+                      f"retrying in {TRANSIENT_BACKOFF_S:.0f}s")
+                if args.once:
+                    sys.exit(1)
+                await asyncio.sleep(TRANSIENT_BACKOFF_S)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[worker] stopped")

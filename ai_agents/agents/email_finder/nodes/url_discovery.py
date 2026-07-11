@@ -1,6 +1,7 @@
 """Parallel sitemap + homepage link discovery for scrape_plan."""
 from __future__ import annotations
 
+import asyncio
 import re
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -238,17 +239,23 @@ async def _run_discovery_async(inp: DiscoveryInput, parent_trace) -> DiscoveryOu
 
     homepage = origin if origin.endswith("/") else origin + "/"
 
-    with httpx.Client() as client:
-        span_sm = parent_trace.span(name="sitemap_harvest")
-        entry = _robots_sitemap_urls(client, homepage)
-        if not entry:
-            candidate = f"{urlparse(homepage).scheme}://{urlparse(homepage).netloc}/sitemap.xml"
-            entry = [candidate]
-        raw_locs = _collect_sitemap_urls(client, entry, homepage, max_locs=400)
-        meta.sitemap_urls_found = len(raw_locs)
-        meta.strategies.append("sitemap")
-        filtered = _filter_scored_sitemap(raw_locs, homepage)
-        span_sm.end()
+    # Sitemap harvest uses sync httpx (fine in a thread, poison in the event
+    # loop): one slow sitemap fetch would stall every other lead in flight.
+    # Same lesson the 19k notebook learned — run the blocking block off-loop.
+    def _sitemap_harvest_blocking() -> list[tuple[str, float]]:
+        with httpx.Client() as client:
+            entry = _robots_sitemap_urls(client, homepage)
+            if not entry:
+                candidate = f"{urlparse(homepage).scheme}://{urlparse(homepage).netloc}/sitemap.xml"
+                entry = [candidate]
+            raw_locs = _collect_sitemap_urls(client, entry, homepage, max_locs=400)
+            meta.sitemap_urls_found = len(raw_locs)
+            meta.strategies.append("sitemap")
+            return _filter_scored_sitemap(raw_locs, homepage)
+
+    span_sm = parent_trace.span(name="sitemap_harvest")
+    filtered = await asyncio.to_thread(_sitemap_harvest_blocking)
+    span_sm.end()
 
     span_home = parent_trace.span(name="homepage_links")
     home_links, h_err = await _homepage_same_origin_links(homepage, inp.trace_id)

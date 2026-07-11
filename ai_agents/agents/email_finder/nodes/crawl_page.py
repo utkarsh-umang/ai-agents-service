@@ -18,15 +18,35 @@ _GENERIC = frozenset(
     {"info", "contact", "hello", "support", "admin", "team", "mail", "enquiries", "enquiry", "noreply"}
 )
 
+# Form placeholders and template junk that appear verbatim in page markup
+# ("your@email.com" in a newsletter input, name@example.com in docs). These
+# are never a real contact — caught in production: a lead landed in the
+# master table with email "your@email.com".
+_PLACEHOLDER_DOMAINS = frozenset(
+    {"example.com", "example.org", "example.net", "domain.com", "yourdomain.com",
+     "yourcompany.com", "yoursite.com", "mysite.com", "website.com", "test.com",
+     "sample.com", "company.com", "sentry.io", "sentry.wixpress.com"}
+)
+_PLACEHOLDER_LOCALS = frozenset(
+    {"your", "youremail", "yourname", "name", "firstname", "lastname",
+     "firstname.lastname", "john.doe", "jane.doe", "user", "username",
+     "test", "example", "sample", "someone", "somebody", "email"}
+)
+
+
+def _is_placeholder_email(email: str) -> bool:
+    local, _, domain = email.lower().partition("@")
+    return domain in _PLACEHOLDER_DOMAINS or local in _PLACEHOLDER_LOCALS
+
 
 def _extract_emails_from_text(text: str) -> list[str]:
     if not text:
         return []
     found = set()
     for m in _EMAIL_RE.findall(text):
-        e = m.strip().rstrip(".,);]")
-        if "@" in e and "." in e.split("@")[-1]:
-            found.add(e.lower())
+        e = m.strip().rstrip(".,);]").lower()
+        if "@" in e and "." in e.split("@")[-1] and not _is_placeholder_email(e):
+            found.add(e)
     return list(found)
 
 
@@ -34,7 +54,7 @@ def _mailto_from_html(html: str) -> list[str]:
     out: list[str] = []
     for m in re.finditer(r'mailto:([^"\'>\s?]+)', html or "", re.I):
         addr = m.group(1).split("?")[0].strip()
-        if "@" in addr:
+        if "@" in addr and not _is_placeholder_email(addr):
             out.append(addr)
     return out
 

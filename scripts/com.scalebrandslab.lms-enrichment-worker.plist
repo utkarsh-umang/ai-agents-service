@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LMS enrichment worker — launchd agent.
+
+  Install (this is what actually starts automated spending — deliberate step):
+    cp scripts/com.scalebrandslab.lms-enrichment-worker.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.scalebrandslab.lms-enrichment-worker.plist
+
+  Stop / uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.scalebrandslab.lms-enrichment-worker.plist
+
+  KeepAlive restarts it after crashes and after laptop wake. Logs go to
+  ~/Library/Logs/lms-enrichment-worker.log.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.scalebrandslab.lms-enrichment-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/utkarshumang/my_projects/ai-agents-service/scripts/run_enrichment_worker.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/utkarshumang/Library/Logs/lms-enrichment-worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/utkarshumang/Library/Logs/lms-enrichment-worker.log</string>
+</dict>
+</plist>

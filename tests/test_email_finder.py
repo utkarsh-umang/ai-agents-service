@@ -23,8 +23,10 @@ def test_merge_candidate_dicts_dedupes_by_email() -> None:
 
 
 def test_extract_emails_basic() -> None:
-    t = "Reach us at hello@example.com or support@test.co.uk."
-    assert "hello@example.com" in _extract_emails_from_text(t)
+    # example.com is deliberately NOT used here — it's rejected as a
+    # placeholder domain now (see test_placeholder_emails_rejected).
+    t = "Reach us at hello@acmecorp.io or support@test.co.uk."
+    assert "hello@acmecorp.io" in _extract_emails_from_text(t)
     assert "support@test.co.uk" in _extract_emails_from_text(t)
 
 
@@ -97,3 +99,11 @@ def test_route_after_resolve_low_cost_ends_instead_of_escalating() -> None:
     assert route_after_resolve(found) == END  # found: done in any mode
     assert route_after_resolve({"status": "pending", "cost_mode": "low"}) == END
     assert route_after_resolve({"status": "pending"}) == "perplexity_discovery"
+
+
+def test_placeholder_emails_rejected() -> None:
+    from ai_agents.agents.email_finder.nodes.crawl_page import _extract_emails_from_text
+
+    text = "Subscribe: your@email.com. Docs: name@example.com. Real: tony@beastmodecamping.com"
+    out = _extract_emails_from_text(text)
+    assert out == ["tony@beastmodecamping.com"]
