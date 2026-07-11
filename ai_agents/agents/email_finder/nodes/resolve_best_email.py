@@ -61,6 +61,9 @@ async def resolve_best_email_async(inp: ResolveInput) -> ResolveOutput:
     try:
         response = litellm.completion(
             model="gpt-4o-mini",
+            # 60s cap — without it the OpenAI SDK default (600s × retries) can hang
+            # an executor thread ~20min and jam the whole page (the Joseph llinas RCA).
+            timeout=60,
             messages=[{"role": "user", "content": filled}],
             response_format={"type": "json_object"},
             metadata={

@@ -99,6 +99,9 @@ def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> d
 
     response = litellm.completion(
         model="gpt-4o-mini",
+        # 60s cap — without it the OpenAI SDK default (600s × retries) can hang
+        # an executor thread ~20min and jam the whole page (the Joseph llinas RCA).
+        timeout=60,
         messages=[{"role": "user", "content": filled_prompt}],
         response_format={"type": "json_object"},
         metadata={

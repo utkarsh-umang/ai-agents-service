@@ -87,6 +87,9 @@ def _guess(name: str, context: str, trace_id: str) -> tuple[str | None, float]:
     filled = _PROMPT.format(name=name, context=context)
     resp = litellm.completion(
         model=_MODEL,
+        # 60s cap — without it the OpenAI SDK default (600s × retries) can hang
+        # an executor thread ~20min and jam the whole page (the Joseph llinas RCA).
+        timeout=60,
         messages=[{"role": "user", "content": filled}],
         response_format={"type": "json_object"},
         temperature=0,
