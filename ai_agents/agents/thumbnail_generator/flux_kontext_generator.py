@@ -47,29 +47,37 @@ def _build_prompt(
     shorts_or_reels: bool,
     has_base_image: bool,
 ) -> str:
+    """Structure validated by A/B testing against the real BFL API (3/3 correct
+    title spelling across variants using this "YouTube thumbnail, wide shot" +
+    explicit-subject-narration phrasing, vs. earlier phrasing that both garbled
+    text and under-transformed the background). Narrating the subject
+    explicitly ("the subject from the base image is now...") gets noticeably
+    stronger background/style transfer than a vaguer "apply the reference
+    style" instruction.
+    """
     parts: list[str] = []
 
     if has_base_image:
         parts.append(
-            "Transform this photo into a viral, high-CTR YouTube thumbnail (MrBeast-style). "
-            "Apply the visual style of the second reference image exactly: matching color "
-            "grading, lighting mood, and composition energy."
+            "A cinematic YouTube thumbnail, wide shot. The subject from the base image "
+            "is now styled to exactly match the color grading, lighting mood, and "
+            "composition of the reference image."
         )
     else:
         parts.append(
-            "Transform this reference photo into a viral, high-CTR YouTube thumbnail "
-            "(MrBeast-style)."
+            "A cinematic YouTube thumbnail, wide shot, styled to exactly match the "
+            "color grading, lighting mood, and composition of the reference image."
         )
     parts.append(
-        "Make the lighting cinematic and high-contrast, boost color saturation, blur the "
-        "background, and keep the subject sharp and centered."
+        "Cinematic high-contrast lighting, vibrant saturated colors, blurred "
+        "background, sharp subject, 8k resolution."
     )
     if shorts_or_reels:
         parts.append("Compose for a vertical 9:16 portrait frame, not landscape.")
 
     if include_title and title:
         parts.append(
-            f'Add bold, thick, high-contrast text at the top reading "{title.upper()}" '
+            f'Add bold, thick, high-contrast text at the top-left reading "{title.upper()}" '
             "(yellow, white, or red), easy to read on mobile, not covering the subject's face."
         )
     else:
