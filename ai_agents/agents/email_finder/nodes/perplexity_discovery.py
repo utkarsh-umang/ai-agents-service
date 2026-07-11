@@ -8,8 +8,8 @@ import httpx
 from ai_agents.core.llm import langfuse, get_prompt
 from ai_agents.agents.email_finder.io.contract_models import PerplexityInput, PerplexityOutput
 from ai_agents.agents.email_finder.state import (
-    EmailFinderState,
     EmailCandidate,
+    EmailFinderState,
     LeadStatus,
     SourceType,
 )
@@ -101,14 +101,8 @@ def _build_query(state: EmailFinderState) -> str:
     return "\n".join(parts)
 
 
-def _call_perplexity_agent(prompt: str) -> str:
-    """
-    Call the Perplexity Agent API with the pro-search preset.
-    This is the same backend as the Perplexity browser chat Pro Search mode:
-    - Model: openai/gpt-5.1
-    - Tools: web_search + fetch_url (can visit specific URLs)
-    - Max steps: 3
-    """
+def _call_perplexity_agent(prompt: str) -> tuple[str, dict]:
+    """Returns (response_text, usage_dict) from the Perplexity Agent API."""
     with httpx.Client(timeout=120.0) as client:
         resp = client.post(
             _AGENT_API_URL,
@@ -125,18 +119,18 @@ def _call_perplexity_agent(prompt: str) -> str:
         resp.raise_for_status()
         data = resp.json()
 
-    # Collect all output_text content items from the response
     text_parts: list[str] = []
     for item in data.get("output", []):
         for content_block in item.get("content", []):
             if content_block.get("type") == "output_text":
                 text_parts.append(content_block.get("text", ""))
 
-    return "".join(text_parts).strip()
+    usage = data.get("usage") or {}
+    return "".join(text_parts).strip(), usage
 
 
-def _parse_perplexity_response(content: str) -> list[EmailCandidate]:
-    # Strip markdown fences if present
+def _parse_perplexity_response(content: str) -> tuple[list[EmailCandidate], str | None]:
+    """Returns (candidates, not_found_reason)."""
     content = re.sub(
         r"^```json|^```|```$", "", content.strip(), flags=re.MULTILINE
     ).strip()
@@ -144,12 +138,16 @@ def _parse_perplexity_response(content: str) -> list[EmailCandidate]:
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
-        return []
+        return [], None
 
     candidates = []
     for item in data.get("emails_found", []):
         email = item.get("email", "").strip()
         if not email or "@" not in email:
+            continue
+        # Skip tagged/plus-addressed emails (info+xyz@domain.com)
+        local_part = email.split("@")[0]
+        if "+" in local_part:
             continue
         candidates.append(
             EmailCandidate(
@@ -160,7 +158,8 @@ def _parse_perplexity_response(content: str) -> list[EmailCandidate]:
             )
         )
 
-    return candidates
+    not_found_reason = data.get("not_found_reason") if not candidates else None
+    return candidates, not_found_reason
 
 
 def _rank_candidates(candidates: list[EmailCandidate]) -> list[EmailCandidate]:
@@ -185,7 +184,10 @@ def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
         name="email_finder",
         session_id="email_finder",
     )
-    span = trace.span(name="perplexity_discovery")
+    generation = trace.generation(
+        name="perplexity_api_call",
+        model="perplexity/pro-search",
+    )
 
     try:
         ef_state = EmailFinderState(
@@ -194,30 +196,40 @@ def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
             email_candidates=inp.prior_email_candidates,
         )
         available_info = _build_query(ef_state)
+        if inp.source:
+            available_info += f"\nListed on: {inp.source}"
 
         filled_prompt = get_prompt(
             "perplexity_email_discovery",
             available_info=available_info
         )
 
-        raw_content = _call_perplexity_agent(filled_prompt)
+        generation.update(input=filled_prompt)
 
-        candidates = _parse_perplexity_response(raw_content)
+        raw_content, usage = _call_perplexity_agent(filled_prompt)
+        candidates, not_found_reason = _parse_perplexity_response(raw_content)
         combined = inp.prior_email_candidates + candidates
         ranked = _rank_candidates(combined)
 
-        span.end()
+        generation.end(
+            output=raw_content[:2000],
+            usage={
+                "input": usage.get("prompt_tokens") or usage.get("input_tokens"),
+                "output": usage.get("completion_tokens") or usage.get("output_tokens"),
+            },
+        )
         trace.event(
             name="perplexity_complete",
-            metadata={"new_candidates": len(candidates), "ranked_total": len(ranked)},
+            metadata={"new_candidates": len(candidates), "ranked_total": len(ranked), "not_found_reason": not_found_reason},
         )
 
         if not ranked:
+            reason_error = [f"perplexity: {not_found_reason}"] if not_found_reason else []
             return PerplexityOutput(
                 email_candidates=combined,
                 best_email=None,
                 status=LeadStatus.EMAIL_NOT_FOUND,
-                errors=[],
+                errors=reason_error,
             )
 
         return PerplexityOutput(
@@ -228,33 +240,17 @@ def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
         )
 
     except Exception as e:
-        span.end()
-        trace.event(name="perplexity_failed", metadata={"error": str(e)})
+        error_msg = str(e)
+        generation.end(level="ERROR", status_message=error_msg)
+        trace.event(name="perplexity_failed", metadata={"error": error_msg})
         return PerplexityOutput(
             email_candidates=inp.prior_email_candidates,
             best_email=None,
             status=LeadStatus.FAILED,
-            errors=[f"perplexity_discovery: {str(e)}"],
+            errors=[f"perplexity_discovery: {error_msg}"],
         )
 
 
-def perplexity_discovery_node(state: EmailFinderState) -> EmailFinderState:
-    """Legacy EmailFinderState API — builds PerplexityInput with a synthetic trace id."""
-
-    trace = langfuse.trace(name="perplexity_discovery", session_id="email_finder")
-    inp = PerplexityInput(
-        lead=state.lead,
-        trace_id=trace.id,
-        prior_email_candidates=list(state.email_candidates),
-    )
-    out = perplexity_discovery_run(inp)
-    return state.model_copy(update={
-        "status": out.status,
-        "email_candidates": out.email_candidates,
-        "best_email": out.best_email,
-        "errors": state.errors + out.errors,
-        "nodes_executed": state.nodes_executed + out.nodes_executed_delta,
-    })
 
 
 async def perplexity_discovery_node_async(state: dict) -> dict:

@@ -16,10 +16,18 @@ class EmailFinderGraphState(TypedDict, total=False):
     raw_row: dict[str, Any]
     source_type: str
 
-    # Cost policy: "high" (default) escalates to paid research (Perplexity)
-    # when free methods are dry; "low" ends as not-found instead. Only the
-    # control plane's routing reads this — no paid call outside Research
-    # Escalation.
+    # When True, the ScrapingBee youtube_about_enricher node is enabled for this
+    # run (used for lists known to be YouTube channels). Gated further on the
+    # lead actually having a YouTube URL. Defaults to False when absent.
+    youtube_list: NotRequired[bool]
+
+    # Provenance of the lead list (e.g. "speakerhub.com", "youtube api tool"),
+    # passed as context to website_guesser and Perplexity. Optional.
+    source: NotRequired[str]
+
+    # Cost policy for this run. "high" (default) runs the full cascade including
+    # the paid terminal research node (Perplexity). "low" runs every FREE/cheap
+    # step but ends as not-found instead of paying for research. Absent → "high".
     cost_mode: NotRequired[str]
 
     # Propagated observability
@@ -39,6 +47,9 @@ class EmailFinderGraphState(TypedDict, total=False):
 
     # Reducer: parallel crawl_page workers append EmailCandidate dicts
     website_scrape_candidates: Annotated[list[dict[str, Any]], operator.add]
+
+    # Reducer: parallel crawl_page workers append FB links found in page HTML
+    scraped_fb_links: Annotated[list[str], operator.add]
 
     errors: Annotated[list[str], operator.add]
     nodes_executed: Annotated[list[str], operator.add]

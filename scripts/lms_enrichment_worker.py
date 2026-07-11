@@ -76,7 +76,10 @@ def _queue_item_to_raw_row(item: dict) -> dict:
         "channel_name": item.get("youtube_channel_name"),
         "youtube_handle": item.get("youtube_handle"),
         "website": item.get("website"),
+        # both spellings: canonical_builder maps this into social_links, and
+        # the graph's _youtube_enabled gate also reads raw "channel_url".
         "youtube_url": item.get("social_youtube"),
+        "channel_url": item.get("social_youtube"),
         "twitter_url": item.get("social_twitter"),
         "instagram_url": item.get("social_instagram"),
         "tiktok_url": item.get("social_tiktok"),
@@ -133,6 +136,11 @@ async def process_page(
                 _queue_item_to_raw_row(item),
                 SourceType.YOUTUBE_SCRIPT_TOOL,
                 semaphore,
+                # youtube_list enables the About-page enricher for leads with
+                # a YouTube URL and no website — the graph gates per-lead, so
+                # this is safe to pass unconditionally.
+                youtube_list=True,
+                source="lms",
                 cost_mode=cost_mode,
             )
             return item, state

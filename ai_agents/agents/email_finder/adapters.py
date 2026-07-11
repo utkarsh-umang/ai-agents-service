@@ -8,8 +8,12 @@ from pydantic import TypeAdapter
 from ai_agents.agents.email_finder.io.contract_models import (
     CrawlPageInput,
     DiscoveryInput,
+    FBCrawlerInput,
     PerplexityInput,
     ResolveInput,
+    ValidateEmailInput,
+    WebsiteGuessInput,
+    YouTubeEnrichInput,
 )
 from ai_agents.agents.email_finder.state import CanonicalLead, EmailCandidate, SourceType
 
@@ -64,6 +68,51 @@ def perplexity_input_from_state(state: dict[str, Any]) -> PerplexityInput:
         lead=parse_canonical_lead(state["lead"]),
         trace_id=state.get("trace_id", ""),
         prior_email_candidates=parse_email_candidates(prior),
+        source=state.get("source"),
+    )
+
+
+def youtube_enrich_input_from_state(state: dict[str, Any]) -> YouTubeEnrichInput:
+    return YouTubeEnrichInput(
+        lead=parse_canonical_lead(state["lead"]),
+        trace_id=state.get("trace_id", ""),
+    )
+
+
+def website_guess_input_from_state(state: dict[str, Any]) -> WebsiteGuessInput:
+    return WebsiteGuessInput(
+        lead=parse_canonical_lead(state["lead"]),
+        trace_id=state.get("trace_id", ""),
+        source=state.get("source"),
+    )
+
+
+def validate_email_input_from_state(state: dict[str, Any]) -> ValidateEmailInput:
+    return ValidateEmailInput(
+        lead=parse_canonical_lead(state["lead"]),
+        trace_id=state.get("trace_id", ""),
+    )
+
+
+def fb_link_from_state(state: dict[str, Any]) -> str | None:
+    """Return FB link from structured data, or first scraped FB link."""
+    lead = state.get("lead") or {}
+    social = lead.get("social_links") or {}
+    fb_lead = social.get("facebook") or ""
+    if fb_lead.strip():
+        return fb_lead.strip()
+    scraped = state.get("scraped_fb_links") or []
+    return scraped[0] if scraped else None
+
+
+def fb_crawler_input_from_state(state: dict[str, Any]) -> FBCrawlerInput:
+    """Build FBCrawlerInput using best available FB link from state."""
+    lead = parse_canonical_lead(state["lead"])
+    fb_link = fb_link_from_state(state) or ""
+    return FBCrawlerInput(
+        lead=lead,
+        fb_link=fb_link,
+        trace_id=state.get("trace_id", ""),
     )
 
 

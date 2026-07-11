@@ -6,7 +6,6 @@ from urllib.parse import urlparse, urlencode, parse_qsl
 import litellm
 from ai_agents.core.llm import langfuse, get_prompt
 from ai_agents.agents.email_finder.state import (
-    EmailFinderState,
     CanonicalLead,
     Identity,
     SocialLinks,
@@ -58,6 +57,38 @@ def _is_valid_email(value: str) -> bool:
     return bool(re.match(pattern, value.strip()))
 
 
+# Public mailbox providers — their domain is NOT a personal/company website, so
+# we never derive a website from an email hosted at one of these.
+_FREE_EMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com", "googlemail.com",
+        "yahoo.com", "yahoo.co.uk", "yahoo.co.in", "ymail.com", "rocketmail.com",
+        "hotmail.com", "hotmail.co.uk", "outlook.com", "live.com", "msn.com",
+        "icloud.com", "me.com", "mac.com",
+        "aol.com", "gmx.com", "gmx.net", "mail.com", "zoho.com",
+        "proton.me", "protonmail.com", "pm.me",
+        "yandex.com", "fastmail.com", "hey.com", "hushmail.com", "tutanota.com",
+    }
+)
+
+
+def _website_from_email(email: str | None) -> str | None:
+    """
+    Derive a likely website from an email's domain when no website was given
+    (jane@acme.com -> https://acme.com). Returns None for free/public mailbox
+    providers (gmail, outlook, ...) whose domain is not the person's site, and
+    for malformed input.
+    """
+    if not email or "@" not in email:
+        return None
+    domain = email.rsplit("@", 1)[-1].strip().lower().strip(".")
+    if not domain or "." not in domain:
+        return None
+    if domain in _FREE_EMAIL_DOMAINS:
+        return None
+    return f"https://{domain}"
+
+
 def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> dict:
     """Use LiteLLM + OpenAI to classify raw row fields."""
     filled_prompt = get_prompt(
@@ -95,8 +126,25 @@ def _build_from_llm_output(
 
     # Sanitize existing email
     existing_email = llm_output.get("existing_email")
-    if existing_email and not _is_valid_email(existing_email):
-        existing_email = None
+    if existing_email:
+        # Handle comma-separated multiple emails — take first valid one
+        for candidate in re.split(r"[,;]\s*", existing_email):
+            if _is_valid_email(candidate.strip()):
+                existing_email = candidate.strip()
+                break
+        else:
+            existing_email = None
+
+    # If no website was given but we have a usable (non-free-provider) email,
+    # derive the website from its domain so the free crawl path has a domain to
+    # work with. Tagged in raw for provenance; routing treats an email-derived
+    # website as a fallback — validation of the existing email still runs first
+    # (see route_after_canonical), so a good existing email is never bypassed.
+    if not website and existing_email:
+        derived = _website_from_email(existing_email)
+        if derived:
+            website = derived
+            raw_row = {**raw_row, "_website_source": "email_domain"}
 
     # Collect discovery URLs (linktr.ee, beacons.ai, carrd.co, etc.)
     # Strip tracking params and reject any that are social platform URLs
@@ -142,7 +190,7 @@ def canonical_builder_to_graph_dict(
     """
     LangGraph entry node: returns partial state including trace_id and empty reducer lists.
     """
-    trace = langfuse.trace(name="canonical_builder", session_id="email_finder")
+    trace = langfuse.trace(name="email_finder", session_id="email_finder")
 
     try:
         span = trace.span(name="llm_classification")
@@ -176,19 +224,3 @@ def canonical_builder_to_graph_dict(
         raise
 
 
-def canonical_builder_node(
-    raw_row: dict[str, Any],
-    source_type: SourceType,
-) -> EmailFinderState:
-    """
-    Entry point node.
-    Takes a raw CSV row + source type.
-    Returns a fully initialized EmailFinderState.
-    """
-    payload = canonical_builder_to_graph_dict(raw_row, source_type)
-    lead = CanonicalLead.model_validate(payload["lead"])
-    return EmailFinderState(
-        lead=lead,
-        status=LeadStatus.PENDING,
-        nodes_executed=["canonical_builder"],
-    )
