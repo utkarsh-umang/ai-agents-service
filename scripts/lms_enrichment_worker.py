@@ -123,13 +123,26 @@ async def _pause(client: httpx.AsyncClient, reason: str) -> None:
 async def process_page(
     client: httpx.AsyncClient, items: list[dict], cost_mode: str, concurrency: int
 ) -> None:
-    """Run one page through the finder and post results. Raises HardBlock
-    (after posting the page's legitimate results) if a systemic LLM error
-    is detected — the affected leads get nothing recorded and stay queued."""
+    """Run one page through the finder, posting each lead's result AS IT
+    FINISHES (not after the whole page): a killed worker loses only the
+    in-flight leads' spend, the queue/dashboard move in real time, and a
+    50-lead page can't sit for an hour looking dead. Raises HardBlock at
+    the end if a systemic LLM error was detected — those leads get nothing
+    recorded and stay queued."""
     graph = build_graph()
     semaphore = asyncio.Semaphore(concurrency)
+    done_count = 0
+    hard_block_reason: str | None = None
 
-    async def run_one(item: dict) -> tuple[dict, dict | Exception]:
+    async def post_result(payload: dict, item: dict) -> None:
+        resp = await client.post(f"{LMS_API}/api/v1/enrichment/results", json=payload)
+        resp.raise_for_status()
+        label = item.get("youtube_channel_name") or item["lead_id"]
+        print(f"[worker]   {label}: {payload['status']}"
+              + (f" -> {payload['value']}" if payload.get("value") else ""))
+
+    async def run_one(item: dict) -> None:
+        nonlocal done_count, hard_block_reason
         try:
             state = await run_single_async(
                 graph,
@@ -143,34 +156,43 @@ async def process_page(
                 source="lms",
                 cost_mode=cost_mode,
             )
-            return item, state
-        except Exception as exc:  # noqa: BLE001 — classified below, never swallowed
-            return item, exc
-
-    outcomes = await asyncio.gather(*(run_one(i) for i in items))
-
-    hard_block_reason: str | None = None
-    for item, outcome in outcomes:
-        if isinstance(outcome, Exception):
-            kind = _classify(outcome)
-            if kind == "hard_block":
+            await post_result(_result_payload(item, state, cost_mode), item)
+        except HardBlock:
+            raise
+        except Exception as exc:  # noqa: BLE001 — classified, never swallowed
+            if _classify(exc) == "hard_block":
                 # Record nothing — this lead must stay in the queue.
-                hard_block_reason = f"{type(outcome).__name__}: {outcome}"
-                continue
-            payload = {
-                "lead_id": item["lead_id"],
-                "type": "email",
-                "cost_mode": cost_mode,
-                "status": "failed",
-                "provider": PROVIDER,
-            }
-        else:
-            payload = _result_payload(item, outcome, cost_mode)
-        resp = await client.post(f"{LMS_API}/api/v1/enrichment/results", json=payload)
-        resp.raise_for_status()
-        label = item.get("youtube_channel_name") or item["lead_id"]
-        print(f"[worker]   {label}: {payload['status']}"
-              + (f" -> {payload['value']}" if payload.get("value") else ""))
+                hard_block_reason = f"{type(exc).__name__}: {exc}"
+                return
+            await post_result(
+                {
+                    "lead_id": item["lead_id"],
+                    "type": "email",
+                    "cost_mode": cost_mode,
+                    "status": "failed",
+                    "provider": PROVIDER,
+                },
+                item,
+            )
+        finally:
+            done_count += 1
+
+    # Background heartbeat while the page runs — without it, a long page
+    # makes the dashboard claim "worker not seen" while it's hard at work.
+    async def heartbeat_loop() -> None:
+        while True:
+            await _heartbeat(
+                client, "processing",
+                f"processing page: {done_count}/{len(items)} done",
+                len(items) - done_count,
+            )
+            await asyncio.sleep(30)
+
+    hb = asyncio.create_task(heartbeat_loop())
+    try:
+        await asyncio.gather(*(run_one(i) for i in items))
+    finally:
+        hb.cancel()
 
     if hard_block_reason:
         raise HardBlock(hard_block_reason)

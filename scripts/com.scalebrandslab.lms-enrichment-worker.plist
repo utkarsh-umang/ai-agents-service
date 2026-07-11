@@ -20,6 +20,14 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/utkarshumang/my_projects/ai-agents-service/scripts/run_enrichment_worker.sh</string>
+    <!-- Laptop-friendly: 4 concurrent crawls (each is a full headless
+         browser with ~8 helper processes; 12 was the notebook's
+         server-grade setting and turned the laptop into a hairdryer).
+         Raise if running unattended and throughput matters more. -->
+    <string>--concurrency</string>
+    <string>4</string>
+    <string>--limit</string>
+    <string>25</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
