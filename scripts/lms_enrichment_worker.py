@@ -47,6 +47,11 @@ PROVIDER = "email_finder@ai-agents-service"
 WAIT_TIMEOUT_S = 55.0
 CLIENT_TIMEOUT_S = 75.0
 TRANSIENT_BACKOFF_S = 20.0
+# Hard per-lead budget (the lite notebook's PER_LEAD_BUDGET_S lesson).
+# One un-timeouted network call anywhere in the graph must never jam the
+# whole pipeline: a lead that exceeds this is recorded "failed" and the
+# page moves on. Generous — a normal lead with heavy crawling takes 1-3min.
+PER_LEAD_BUDGET_S = 300.0
 
 # Signatures of errors that can never self-heal — pausing for a human is
 # the only correct response. Matched against the exception's full repr.
@@ -144,19 +149,39 @@ async def process_page(
     async def run_one(item: dict) -> None:
         nonlocal done_count, hard_block_reason
         try:
-            state = await run_single_async(
-                graph,
-                _queue_item_to_raw_row(item),
-                SourceType.YOUTUBE_SCRIPT_TOOL,
-                semaphore,
-                # youtube_list enables the About-page enricher for leads with
-                # a YouTube URL and no website — the graph gates per-lead, so
-                # this is safe to pass unconditionally.
-                youtube_list=True,
-                source="lms",
-                cost_mode=cost_mode,
-            )
+            # Hold the concurrency slot OUTSIDE the budget timer — a lead
+            # queued behind others must not burn budget while waiting. The
+            # inner call gets a fresh single-use semaphore that never blocks.
+            async with semaphore:
+                state = await asyncio.wait_for(
+                    run_single_async(
+                        graph,
+                        _queue_item_to_raw_row(item),
+                        SourceType.YOUTUBE_SCRIPT_TOOL,
+                        asyncio.Semaphore(1),
+                        # youtube_list enables the About-page enricher for
+                        # leads with a YouTube URL and no website — the graph
+                        # gates per-lead, so it's safe unconditionally.
+                        youtube_list=True,
+                        source="lms",
+                        cost_mode=cost_mode,
+                    ),
+                    timeout=PER_LEAD_BUDGET_S,
+                )
             await post_result(_result_payload(item, state, cost_mode), item)
+        except asyncio.TimeoutError:
+            label = item.get("youtube_channel_name") or item["lead_id"]
+            print(f"[worker]   {label}: exceeded {PER_LEAD_BUDGET_S:.0f}s budget — recording failed")
+            await post_result(
+                {
+                    "lead_id": item["lead_id"],
+                    "type": "email",
+                    "cost_mode": cost_mode,
+                    "status": "failed",
+                    "provider": PROVIDER,
+                },
+                item,
+            )
         except HardBlock:
             raise
         except Exception as exc:  # noqa: BLE001 — classified, never swallowed
