@@ -39,16 +39,14 @@ def generate_with_nanobanana(
     """
     Generate a thumbnail via Gemini image output. Returns raw image bytes.
     """
-    # Explicit timeout: without one, a stalled connection is invisible to this
-    # call and the only thing that would ever notice is the caller's own
-    # task-level time limit, which depends on signal-delivery timing rather
-    # than a normal, reliably-caught exception. 90s (90_000ms — this SDK's
-    # HttpOptions.timeout is in milliseconds, not seconds) leaves headroom
-    # under the 150s Celery soft limit for the image downloads/uploads around
-    # this call.
+    # Explicit request timeout. Gemini image renders can also take ~90s+, so
+    # this sits well above that — matching the gpt-image fix (an earlier 90s
+    # value risked cutting real renders off). 180_000ms (this SDK's
+    # HttpOptions.timeout is in milliseconds, not seconds) under the 300s
+    # Celery soft limit.
     client = genai.Client(
         api_key=_gemini_api_key(),
-        http_options=types.HttpOptions(timeout=90_000),
+        http_options=types.HttpOptions(timeout=180_000),
     )
 
     system_text = build_thumbnail_system_prompt(shorts_or_reels)
