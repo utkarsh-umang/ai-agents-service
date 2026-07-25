@@ -38,6 +38,7 @@ import httpx
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ai_agents.agents.email_finder.graph import build_graph, run_single_async  # noqa: E402
+from ai_agents.agents.email_finder.guest_finder import find_guest_email  # noqa: E402
 from ai_agents.agents.email_finder.state import LeadStatus, SourceType  # noqa: E402
 
 LMS_API = os.environ.get("LMS_API_URL", "http://localhost:8000").rstrip("/")
@@ -95,6 +96,21 @@ def _queue_item_to_raw_row(item: dict) -> dict:
     }
 
 
+def _queue_item_to_guest_lead(item: dict) -> dict:
+    """Queue item -> the identity dict the search-first guest finder needs."""
+    name = f"{(item.get('first_name') or '').strip()} {(item.get('last_name') or '').strip()}".strip()
+    return {
+        "name": name,
+        "company": item.get("company_name"),
+        "occupation": item.get("job_title"),
+        "industry": item.get("industry"),
+        "website": item.get("website"),
+        "linkedin": item.get("social_linkedin"),
+        "twitter": item.get("social_twitter"),
+        "instagram": item.get("social_instagram"),
+    }
+
+
 def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
     best = state.get("best_email") or {}
     email = best.get("email") if isinstance(best, dict) else None
@@ -108,6 +124,10 @@ def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
         "value": email if found else None,
         "confidence": best.get("confidence") if found else None,
         "provider": PROVIDER,
+        # Real per-lead spend accumulated by the graph (exact litellm costs +
+        # estimated ScrapingBee/Perplexity per-call costs). Rounded: sub-cent
+        # precision matters when a lead costs $0.0003.
+        "cost_incurred": round(float(state.get("cost_usd") or 0.0), 6),
     }
 
 
@@ -153,21 +173,30 @@ async def process_page(
             # queued behind others must not burn budget while waiting. The
             # inner call gets a fresh single-use semaphore that never blocks.
             async with semaphore:
-                state = await asyncio.wait_for(
-                    run_single_async(
-                        graph,
-                        _queue_item_to_raw_row(item),
-                        SourceType.YOUTUBE_SCRIPT_TOOL,
-                        asyncio.Semaphore(1),
-                        # youtube_list enables the About-page enricher for
-                        # leads with a YouTube URL and no website — the graph
-                        # gates per-lead, so it's safe unconditionally.
-                        youtube_list=True,
-                        source="lms",
-                        cost_mode=cost_mode,
-                    ),
-                    timeout=PER_LEAD_BUDGET_S,
-                )
+                if item.get("lead_tag"):
+                    # Tagged (podscan) lead -> the search-first guest finder.
+                    # It's sync (drives Crawl4AI on a private loop), so run it in
+                    # a thread to keep this event loop free.
+                    state = await asyncio.wait_for(
+                        asyncio.to_thread(find_guest_email, _queue_item_to_guest_lead(item), cost_mode),
+                        timeout=PER_LEAD_BUDGET_S,
+                    )
+                else:
+                    state = await asyncio.wait_for(
+                        run_single_async(
+                            graph,
+                            _queue_item_to_raw_row(item),
+                            SourceType.YOUTUBE_SCRIPT_TOOL,
+                            asyncio.Semaphore(1),
+                            # youtube_list enables the About-page enricher for
+                            # leads with a YouTube URL and no website — the graph
+                            # gates per-lead, so it's safe unconditionally.
+                            youtube_list=True,
+                            source="lms",
+                            cost_mode=cost_mode,
+                        ),
+                        timeout=PER_LEAD_BUDGET_S,
+                    )
             await post_result(_result_payload(item, state, cost_mode), item)
         except asyncio.TimeoutError:
             label = item.get("youtube_channel_name") or item["lead_id"]
