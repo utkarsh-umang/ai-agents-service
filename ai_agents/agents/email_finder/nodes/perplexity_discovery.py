@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import httpx
 from ai_agents.core.llm import langfuse, get_prompt
 from ai_agents.agents.email_finder.io.contract_models import PerplexityInput, PerplexityOutput
+from ai_agents.agents.email_finder.nodes.cost_utils import PERPLEXITY_COST_USD
 from ai_agents.agents.email_finder.state import (
     EmailCandidate,
     EmailFinderState,
@@ -230,6 +231,7 @@ def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
                 best_email=None,
                 status=LeadStatus.EMAIL_NOT_FOUND,
                 errors=reason_error,
+                cost_usd=PERPLEXITY_COST_USD,
             )
 
         return PerplexityOutput(
@@ -237,6 +239,7 @@ def perplexity_discovery_run(inp: PerplexityInput) -> PerplexityOutput:
             best_email=ranked[0],
             status=LeadStatus.EMAIL_FOUND,
             errors=[],
+            cost_usd=PERPLEXITY_COST_USD,
         )
 
     except Exception as e:
@@ -265,4 +268,5 @@ async def perplexity_discovery_node_async(state: dict) -> dict:
         "best_email": out.best_email.model_dump(mode="json") if out.best_email else None,
         "errors": out.errors,
         "nodes_executed": out.nodes_executed_delta,
+        "cost_usd": out.cost_usd,
     }

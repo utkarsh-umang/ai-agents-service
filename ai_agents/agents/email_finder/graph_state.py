@@ -54,6 +54,11 @@ class EmailFinderGraphState(TypedDict, total=False):
     errors: Annotated[list[str], operator.add]
     nodes_executed: Annotated[list[str], operator.add]
 
+    # Reducer: every node adds what its paid calls actually cost (USD). LLM
+    # nodes report exact litellm costs; ScrapingBee/Perplexity add per-call
+    # estimates (see nodes/cost_utils.py). Initialized to 0.0 at invoke.
+    cost_usd: Annotated[float, operator.add]
+
     # crawl_page Send payload (NotRequired — only present in worker arg)
     url: NotRequired[str]
     page_timeout_ms: NotRequired[int]

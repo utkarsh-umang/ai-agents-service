@@ -4,6 +4,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse, urlencode, parse_qsl
 import litellm
+from ai_agents.agents.email_finder.nodes.cost_utils import llm_call_cost
 from ai_agents.core.llm import langfuse, get_prompt
 from ai_agents.agents.email_finder.state import (
     CanonicalLead,
@@ -89,8 +90,8 @@ def _website_from_email(email: str | None) -> str | None:
     return f"https://{domain}"
 
 
-def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> dict:
-    """Use LiteLLM + OpenAI to classify raw row fields."""
+def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> tuple[dict, float]:
+    """Use LiteLLM + OpenAI to classify raw row fields. Returns (output, cost_usd)."""
     filled_prompt = get_prompt(
         "canonical_builder",
         source_type=source_type.value,
@@ -112,7 +113,7 @@ def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> d
 
     import json
     content = response.choices[0].message.content.strip()
-    return json.loads(content)
+    return json.loads(content), llm_call_cost(response)
 
 
 def _build_from_llm_output(
@@ -197,7 +198,7 @@ def canonical_builder_to_graph_dict(
 
     try:
         span = trace.span(name="llm_classification")
-        llm_output = _extract_via_llm(raw_row, source_type, trace_id=trace.id)
+        llm_output, llm_cost = _extract_via_llm(raw_row, source_type, trace_id=trace.id)
         span.end()
 
         lead = _build_from_llm_output(llm_output, source_type, raw_row)
@@ -220,6 +221,7 @@ def canonical_builder_to_graph_dict(
             "trace_id": trace.id,
             "website_scrape_candidates": [],
             "scrape_plan": [],
+            "cost_usd": llm_cost,
         }
 
     except Exception as e:

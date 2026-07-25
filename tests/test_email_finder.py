@@ -233,7 +233,7 @@ def test_build_context_skips_source_noise_and_urls() -> None:
 
 
 def _run_with_guess(monkeypatch, website, confidence):
-    monkeypatch.setattr(wg, "_guess", lambda name, ctx, tid: (website, confidence))
+    monkeypatch.setattr(wg, "_guess", lambda name, ctx, tid: (website, confidence, 0.0))
     out = wg.website_guesser_run(WebsiteGuessInput(lead=_lead(Bio="x"), trace_id="", source=None))
     return out.lead
 

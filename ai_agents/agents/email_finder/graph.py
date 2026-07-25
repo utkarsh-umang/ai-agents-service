@@ -368,6 +368,7 @@ def run_single(
                 "youtube_list": youtube_list,
                 "source": source,
                 "cost_mode": cost_mode,
+                "cost_usd": 0.0,
             }
         )
 
@@ -399,7 +400,7 @@ async def run_single_async(
         print(f"  [{index}/{total}] Starting: {label}")
         st_val = source_type.value if isinstance(source_type, SourceType) else source_type
         result = await graph.ainvoke(
-            {"raw_row": raw_row, "source_type": st_val, "youtube_list": youtube_list, "source": source, "cost_mode": cost_mode}
+            {"raw_row": raw_row, "source_type": st_val, "youtube_list": youtube_list, "source": source, "cost_mode": cost_mode, "cost_usd": 0.0}
         )
         status = result.get("status", "?")
         nodes = result.get("nodes_executed") or []
