@@ -86,7 +86,13 @@ def generate_with_gpt_image(
     if not model.startswith("gpt-image-2") and input_fidelity is not None:
         edit_kwargs["input_fidelity"] = input_fidelity
 
-    client = OpenAI()
+    # Explicit timeout: without one, a stalled connection is invisible to this
+    # call (the SDK's own default is measured in minutes) and the only thing
+    # that would ever notice is the caller's own task-level time limit, which
+    # depends on signal-delivery timing rather than a normal, reliably-caught
+    # exception. 90s leaves headroom under the 150s Celery soft limit for the
+    # image downloads/uploads around this call.
+    client = OpenAI(timeout=90.0)
     response = client.images.edit(**edit_kwargs)
 
     if not response.data or not response.data[0].b64_json:
