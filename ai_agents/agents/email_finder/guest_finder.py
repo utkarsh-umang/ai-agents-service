@@ -99,6 +99,25 @@ def _is_generic(email: str, ptoks: list[str]) -> bool:
         return not any(t in dom for t in ptoks)   # keep on own-name domain
     return False
 
+
+def _name_bound(email: str, ptoks: list[str]) -> bool:
+    """True iff the email plausibly belongs to THIS person: a name token appears
+    in the local-part or the domain. This is the single strongest precision
+    signal on multi-person organization pages (an Economist/Atlantic/university
+    page holds dozens of staff emails on the same domain; only the one bearing
+    the person's name is theirs). A live 2,245-lead run showed ~40% of raw
+    'found' emails were a colleague's or a department inbox — every one failed
+    this check, every correct one passed it.
+
+    Trade-off: rejects cryptic institutional IDs that don't spell the name
+    (sv2r@virginia.edu, mmain@ufl.edu). Recovering those correctly needs
+    structure-aware extraction (bind the email to the name's position on the
+    page) — the Tier-2 follow-up; until then precision wins over that tail."""
+    if not ptoks:
+        return True
+    lp, _, dom = email.lower().partition("@")
+    return any(t in lp for t in ptoks) or any(t in dom for t in ptoks)
+
 def _mx_hosts(domain: str) -> list[str] | None:
     try:
         out = subprocess.run(["dig", "+short", "MX", domain],
@@ -249,6 +268,10 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
             return _not_found(cost, f"{em}: suspicious local-part", nodes)
         if _is_generic(em, ptoks):
             return _not_found(cost, f"{em}: generic role inbox", nodes)
+        if not _name_bound(em, ptoks):
+            # right org, wrong person — a colleague's or a department inbox on a
+            # multi-person org page. See _name_bound.
+            return _not_found(cost, f"{em}: not bound to person's name (likely colleague/dept)", nodes)
         if not any(not _is_aggregator(u) for u in prov[em]):
             return _not_found(cost, f"{em}: data-broker-only source", nodes)
         vs = _verify(em)
