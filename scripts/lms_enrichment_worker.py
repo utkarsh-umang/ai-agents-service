@@ -128,6 +128,9 @@ def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
         # estimated ScrapingBee/Perplexity per-call costs). Rounded: sub-cent
         # precision matters when a lead costs $0.0003.
         "cost_incurred": round(float(state.get("cost_usd") or 0.0), 6),
+        # Candidate context (guest finder) so a later logic change can re-score
+        # this attempt offline — no re-search, no re-scrape.
+        "evidence": state.get("evidence"),
     }
 
 

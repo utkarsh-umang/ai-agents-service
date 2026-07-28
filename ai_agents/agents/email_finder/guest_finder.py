@@ -175,9 +175,23 @@ def _lead_context(lead: dict) -> str:
     return "\n".join(parts)
 
 
-def _not_found(cost: float, note: str, nodes: list[str]) -> dict:
+def _not_found(cost: float, note: str, nodes: list[str], evidence: dict | None = None) -> dict:
     return {"best_email": None, "status": LeadStatus.EMAIL_NOT_FOUND.value,
-            "cost_usd": round(cost, 6), "nodes_executed": nodes, "note": note}
+            "cost_usd": round(cost, 6), "nodes_executed": nodes, "note": note, "evidence": evidence}
+
+
+def _build_evidence(prov: dict, ctx: dict) -> dict:
+    """The candidate context to persist — scraped emails + their source domains
+    + surrounding text. Lets a later logic change re-score this attempt offline
+    (no re-search, no re-scrape). Bounded so the JSONB stays small."""
+    cands = []
+    for e, urls in prov.items():
+        cands.append({
+            "email": e,
+            "sources": sorted({_domain(u) for u in urls if u})[:5],
+            "contexts": [c[:200] for c in ctx.get(e, [])[:2]],
+        })
+    return {"candidates": cands[:40]}
 
 
 # --- main --------------------------------------------------------------------
@@ -256,6 +270,12 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
         if not prov:
             return _not_found(cost, "no candidate emails scraped", nodes)
 
+        # Persist the candidate context so a later logic change can re-score this
+        # attempt offline. nf() = not-found with this evidence + the live cost.
+        evidence = _build_evidence(prov, ctx)
+        def nf(note: str) -> dict:
+            return _not_found(cost, note, nodes, evidence)
+
         # 3. LLM RANK — pool-only, person + affiliation bound, source-trust aware,
         #    with Tier-2 name-proximity ("does the person's name sit next to this
         #    email on the page") as the strongest single signal.
@@ -298,20 +318,20 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
         # 4. DETERMINISTIC GUARDS
         nodes.append("guards")
         if not em or "@" not in em or em not in prov:
-            return _not_found(cost, f"no valid in-pool pick ({em or 'null'})", nodes)
+            return nf(f"no valid in-pool pick ({em or 'null'})")
         lp = em.split("@")[0]
         if any(s in lp for s in _SUSPICIOUS_LP):
-            return _not_found(cost, f"{em}: suspicious local-part", nodes)
+            return nf(f"{em}: suspicious local-part")
         if _is_generic(em, ptoks):
-            return _not_found(cost, f"{em}: generic role inbox", nodes)
+            return nf(f"{em}: generic role inbox")
         # Bind to the person: EITHER the name is in the email (Tier 1) OR the
         # name sits next to it on the page (Tier 2). This recovers cryptic-but-
         # correct institutional IDs while still rejecting a colleague's address
         # (whose neighbour on the page is THEIR name, not the target's).
         if not (_name_bound(em, ptoks) or _name_near(em)):
-            return _not_found(cost, f"{em}: not bound to person (name not in it nor near it on page)", nodes)
+            return nf(f"{em}: not bound to person (name not in it nor near it on page)")
         if not any(not _is_aggregator(u) for u in prov[em]):
-            return _not_found(cost, f"{em}: data-broker-only source", nodes)
+            return nf(f"{em}: data-broker-only source")
         # Tier 3: confirm a WEAK match against the page text. A pick is strong
         # only when BOTH the first and last name are in the local-part
         # (james.chappel@) — that's unambiguous, skip. Everything else is risky:
@@ -339,14 +359,14 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
             except Exception:
                 verdict = {}
             if verdict.get("belongs_to_person") is False:
-                return _not_found(cost, f"{em}: Tier-3 — belongs to someone else ({str(verdict.get('why',''))[:60]})", nodes)
+                return nf(f"{em}: Tier-3 — belongs to someone else ({str(verdict.get('why',''))[:60]})")
         vs = _verify(em)
         if vs == "invalid_nomx":
             # Dead domain — a reliable reject. But NOT invalid_mailbox: SMTP RCPT
             # probes false-reject valid addresses under greylisting/probe-blocking
             # (james.chappel@duke.edu came back invalid one run, valid the next),
             # so a 550 is treated as "unknown" (kept, small confidence penalty).
-            return _not_found(cost, f"{em}: {vs}", nodes)
+            return nf(f"{em}: {vs}")
 
         conf = float(pick.get("confidence") or 0.5)
         if any(t in lp for t in ptoks):
@@ -354,7 +374,7 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
         conf = min(1.0, conf + 0.1) if vs == "valid" else conf * 0.9
         conf = round(conf, 2)
         if conf < _CONF_GATE:
-            return _not_found(cost, f"{em}: confidence {conf} < gate {_CONF_GATE}", nodes)
+            return nf(f"{em}: confidence {conf} < gate {_CONF_GATE}")
 
         return {
             "best_email": {"email": em, "source": "; ".join(cands),
@@ -362,6 +382,7 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
             "status": LeadStatus.EMAIL_FOUND.value,
             "cost_usd": round(cost, 6),
             "nodes_executed": nodes,
+            "evidence": evidence,
         }
     except Exception as exc:
         logger.exception("guest_finder failed for %s", lead.get("name"))
