@@ -118,6 +118,22 @@ def _name_bound(email: str, ptoks: list[str]) -> bool:
     lp, _, dom = email.lower().partition("@")
     return any(t in lp for t in ptoks) or any(t in dom for t in ptoks)
 
+
+def _email_contexts(text: str, window: int = 140):
+    """Every email in `text` with the surrounding text window — so we can bind
+    an email to the name it sits next to on a multi-person page (Tier 2)."""
+    out = []
+    for m in _EMAIL_RX.finditer(text or ""):
+        s = max(0, m.start() - window)
+        e = min(len(text), m.end() + window)
+        out.append((m.group(0).lower(), text[s:e]))
+    return out
+
+
+def _url_has_name(url: str, ptoks: list[str]) -> bool:
+    u = (url or "").lower()
+    return any(t in u for t in ptoks)
+
 def _mx_hosts(domain: str) -> list[str] | None:
     try:
         out = subprocess.run(["dig", "+short", "MX", domain],
@@ -183,17 +199,27 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
                                 json={"q": q, "num": 10}, timeout=30).json().get("organic", [])
         cost += 0.001
 
+        ptoks = _person_tokens(lead.get("name"))
         prov: dict[str, set[str]] = {}
-        def add(email: str, url: str) -> None:
+        ctx: dict[str, list[str]] = {}   # email -> text windows it appeared in (Tier 2 proximity)
+        def add(email: str, url: str, context: str = "") -> None:
             e = email.lower()
             if e.endswith(_IMG_EXT):
                 return
             prov.setdefault(e, set()).add(url or "")
+            if context:
+                ctx.setdefault(e, []).append(context)
         for o in organic:
-            for e in _EMAIL_RX.findall(o.get("snippet", "") + " " + o.get("title", "")):
-                add(e, o.get("link", ""))
-        cands = [o["link"] for o in organic if o.get("link")
-                 and not any(d in o["link"].lower() for d in _SOCIAL_DIRECTORY)][:cfg.max_pages]
+            snip = o.get("snippet", "") + " " + o.get("title", "")
+            for e in _EMAIL_RX.findall(snip):
+                add(e, o.get("link", ""), snip)
+        # Tier 2b: prefer the person's OWN page (name in the URL slug, e.g.
+        # /contributor/jane-doe) over a directory — on their own page the only
+        # email is theirs, so the multi-person ambiguity never arises.
+        cand_urls = [o["link"] for o in organic if o.get("link")
+                     and not any(d in o["link"].lower() for d in _SOCIAL_DIRECTORY)]
+        cand_urls.sort(key=lambda u: not _url_has_name(u, ptoks))
+        cands = cand_urls[:cfg.max_pages]
 
         # 2. SCRAPE — Crawl4AI primary, ScrapingBee(JS) fallback
         nodes.append("scrape")
@@ -212,8 +238,8 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
             return out
         c4a = asyncio.run(crawl_all(cands)) if cands else []
         for u, md in zip(cands, c4a):
-            for e in _EMAIL_RX.findall(md):
-                add(e, u)
+            for e, cx in _email_contexts(md):
+                add(e, u, cx)
         for u, md in zip(cands, c4a):
             if cfg.scrapingbee_key and len(md or "") < 300:
                 nodes.append("scrapingbee_fallback")
@@ -222,27 +248,36 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
                                      params={"api_key": cfg.scrapingbee_key, "url": u, "render_js": "true"},
                                      timeout=60)
                     cost += 0.005
-                    for e in _EMAIL_RX.findall(p.text):
-                        add(e, u)
+                    for e, cx in _email_contexts(p.text):
+                        add(e, u, cx)
                 except Exception:
                     pass
         if not prov:
             return _not_found(cost, "no candidate emails scraped", nodes)
 
-        # 3. LLM RANK — pool-only, person + affiliation bound, source-trust aware
+        # 3. LLM RANK — pool-only, person + affiliation bound, source-trust aware,
+        #    with Tier-2 name-proximity ("does the person's name sit next to this
+        #    email on the page") as the strongest single signal.
         nodes.append("llm_select")
-        ptoks = _person_tokens(lead.get("name"))
+        def _name_near(email: str) -> bool:
+            return any(any(t in w.lower() for t in ptoks) for w in ctx.get(email, []))
         lines = []
         for e, urls in prov.items():
             srcs = sorted({_domain(u) for u in urls if u})
             trusted = any(not _is_aggregator(u) for u in urls)
-            lines.append(f"{e}  | sources: {', '.join(srcs) or '?'} | {'trusted-page' if trusted else 'DATA-BROKER-ONLY'}")
+            near = "NAME-IS-NEXT-TO-IT" if _name_near(e) else "name-not-near-it"
+            lines.append(f"{e}  | sources: {', '.join(srcs) or '?'} | "
+                         f"{'trusted-page' if trusted else 'DATA-BROKER-ONLY'} | {near}")
         from openai import OpenAI
         client = OpenAI(api_key=cfg.openai_key)
         resp = client.chat.completions.create(model=_MODEL, temperature=0, messages=[{"role": "user", "content":
             f"{_lead_context(lead)}\n\nCandidate emails scraped for this person (with where each was found):\n"
             + "\n".join(lines) +
             "\n\nPick the ONE email that belongs to THIS SPECIFIC person. Hard rules:\n"
+            "- STRONGEST signal: an email marked NAME-IS-NEXT-TO-IT sits beside this person's name on "
+            "the page — strongly prefer it even if the local-part doesn't spell their name (e.g. a "
+            "cryptic university ID). An email marked name-not-near-it on a shared org page is likely a "
+            "COLLEAGUE's or a department inbox -> avoid unless nothing better exists.\n"
             "- The org/domain must be consistent with the person's role/company above. An email whose "
             "organization is unrelated to their known work is a DIFFERENT person with the same name -> reject.\n"
             "- Reject an email found ONLY on data-broker pages (marked DATA-BROKER-ONLY).\n"
@@ -268,10 +303,12 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
             return _not_found(cost, f"{em}: suspicious local-part", nodes)
         if _is_generic(em, ptoks):
             return _not_found(cost, f"{em}: generic role inbox", nodes)
-        if not _name_bound(em, ptoks):
-            # right org, wrong person — a colleague's or a department inbox on a
-            # multi-person org page. See _name_bound.
-            return _not_found(cost, f"{em}: not bound to person's name (likely colleague/dept)", nodes)
+        # Bind to the person: EITHER the name is in the email (Tier 1) OR the
+        # name sits next to it on the page (Tier 2). This recovers cryptic-but-
+        # correct institutional IDs while still rejecting a colleague's address
+        # (whose neighbour on the page is THEIR name, not the target's).
+        if not (_name_bound(em, ptoks) or _name_near(em)):
+            return _not_found(cost, f"{em}: not bound to person (name not in it nor near it on page)", nodes)
         if not any(not _is_aggregator(u) for u in prov[em]):
             return _not_found(cost, f"{em}: data-broker-only source", nodes)
         vs = _verify(em)
