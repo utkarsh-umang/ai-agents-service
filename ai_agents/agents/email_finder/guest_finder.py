@@ -65,7 +65,8 @@ _GENERIC_LP = {"info", "contact", "hello", "support", "admin", "team", "office",
     "media", "press", "inquiries", "inquiry", "enquiries", "general", "mail", "booking",
     "bookings", "pr", "marketing", "newsletter", "careers", "jobs", "webmaster", "postmaster",
     "noreply", "no-reply", "hi", "hey", "podcast", "podcasts", "feedback", "hq", "studio",
-    "partnerships", "partner", "collab", "collabs", "business", "biz"}
+    "partnerships", "partner", "collab", "collabs", "business", "biz",
+    "editor", "editors", "editorial", "newsroom", "news", "tips", "desk", "comments", "reader", "subscriptions"}
 _SUSPICIOUS_LP = ("official", "real", "thereal", "fanmail", "fan", "fake")
 _CATCHALL_PROVIDERS = ("gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
     "yahoo.com", "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "msn.com")
@@ -311,8 +312,40 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
             return _not_found(cost, f"{em}: not bound to person (name not in it nor near it on page)", nodes)
         if not any(not _is_aggregator(u) for u in prov[em]):
             return _not_found(cost, f"{em}: data-broker-only source", nodes)
+        # Tier 3: confirm a WEAK match against the page text. A pick is strong
+        # only when BOTH the first and last name are in the local-part
+        # (james.chappel@) — that's unambiguous, skip. Everything else is risky:
+        #   - proximity-only (colleague's email next to the target's name)
+        #   - last-name-only (a NAMESAKE — masao.yanaga@ for Elena Yanaga)
+        #   - cryptic institutional ID (sv2r@ — could be anyone)
+        # For those, ask the LLM to read the surrounding text and confirm the
+        # email is actually THIS person's, not a neighbour's or a namesake's.
+        first_tok = ptoks[0] if ptoks else ""
+        last_tok = ptoks[-1] if len(ptoks) > 1 else ""
+        strong = bool(first_tok and last_tok and first_tok in lp and last_tok in lp)
+        if not strong and ctx.get(em):
+            nodes.append("tier3_confirm")
+            try:
+                conf_resp = client.chat.completions.create(model=_MODEL, temperature=0, messages=[{"role": "user", "content":
+                    f"Person: {lead.get('name')} — {lead.get('occupation','')} at {lead.get('company','')}.\n"
+                    f"Email in question: {em}\n\nText from the page(s) where it appears:\n"
+                    + "\n---\n".join(ctx.get(em, [])[:3]) +
+                    "\n\nSeveral people may be named on this page. Does this email belong to THAT person "
+                    "specifically, or to someone else mentioned nearby (a co-author, colleague, editor, or "
+                    'other staff)? Answer ONLY JSON {"belongs_to_person": true or false, "why": "<short>"}'}])
+                cost += 0.0004
+                cm = re.search(r"\{.*\}", conf_resp.choices[0].message.content, re.S)
+                verdict = json.loads(cm.group(0)) if cm else {}
+            except Exception:
+                verdict = {}
+            if verdict.get("belongs_to_person") is False:
+                return _not_found(cost, f"{em}: Tier-3 — belongs to someone else ({str(verdict.get('why',''))[:60]})", nodes)
         vs = _verify(em)
-        if vs in ("invalid_nomx", "invalid_mailbox"):
+        if vs == "invalid_nomx":
+            # Dead domain — a reliable reject. But NOT invalid_mailbox: SMTP RCPT
+            # probes false-reject valid addresses under greylisting/probe-blocking
+            # (james.chappel@duke.edu came back invalid one run, valid the next),
+            # so a 550 is treated as "unknown" (kept, small confidence penalty).
             return _not_found(cost, f"{em}: {vs}", nodes)
 
         conf = float(pick.get("confidence") or 0.5)
