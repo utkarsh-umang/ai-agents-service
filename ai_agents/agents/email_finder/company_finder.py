@@ -114,7 +114,10 @@ def _patterns(full_name: str, domain: str) -> list[str]:
         return []
     f, l = parts[0], parts[-1]
     fi = f[0]
-    locals_ = [f"{f}.{l}", f"{f}{l}", f"{fi}{l}", f"{f}", f"{fi}.{l}", f"{f}_{l}", f"{f}-{l}", f"{l}.{f}", f"{l}{fi}"]
+    # Ordered by global corporate frequency so the pattern-probe learns the
+    # domain's format in as few verifies as possible: first.last, flast, first,
+    # firstlast, then the long tail.
+    locals_ = [f"{f}.{l}", f"{fi}{l}", f"{f}", f"{f}{l}", f"{fi}.{l}", f"{f}_{l}", f"{f}-{l}", f"{l}.{f}", f"{l}{fi}"]
     seen, out = set(), []
     for lp in locals_:
         if lp and lp not in seen:
@@ -256,6 +259,15 @@ async def _find_people(client, cfg, domain, company) -> tuple[list[dict], set[st
                     page_emails.add(e.lower())
     people = _parse_people(await _gpt(client, cfg.openai_key, _EXTRACT_SYS, " ".join(texts)[:16000]))
     src = "site"
+    # FREE pattern signal (0 Mailin credits): harvest any published personal
+    # address on this domain from a search snippet, so Step 0 of _pick_contact
+    # can match it to a senior person and skip the verify-probe entirely.
+    if cfg.serper_key:
+        res = await _serper(client, cfg.serper_key, f'"@{domain}"')
+        for o in res.get("organic", [])[:8]:
+            for e in _EMAIL_RE.findall(f"{o.get('title','')} {o.get('snippet','')} {o.get('link','')}"):
+                if _domain_matches(domain, e.split("@")[-1].lower()) and e.split("@")[0] not in _GENERIC_LP:
+                    page_emails.add(e.lower())
     if not people and cfg.serper_key:
         res = await _serper(client, cfg.serper_key,
                             f'"{company}" (CEO OR founder OR "managing director" OR CMO OR president) site:linkedin.com/in')
@@ -267,8 +279,20 @@ async def _find_people(client, cfg, domain, company) -> tuple[list[dict], set[st
     return people, page_emails, src
 
 
-async def _pick_contact(cfg, domain, people, page_emails, max_people, max_patterns):
-    """Verify candidates via Mailin; return the first deliverable contact + a log."""
+async def _pick_contact(cfg, domain, people, page_emails, max_patterns):
+    """Credit-optimal: the email pattern is per-DOMAIN, not per-person, so we
+    only need ONE senior person + the domain's pattern to have an address for
+    them. We therefore:
+      0. take a FREE win if a scraped on-page email already matches a senior
+         person (their published address) — verify once to confirm;
+      1. PROBE the single top person's likeliest patterns to learn the domain's
+         format, stopping at the first `ok` (or accepting a catch-all as-is);
+      2. EARLY-BAIL if those all verify `invalid` — every mailbox on this domain
+         shares the pattern, so trying other PEOPLE is pure wasted credits;
+      3. fall back to just two generics (info@, contact@), not seven.
+    A `catch_all` verdict is accepted (the domain takes all mail; probing more
+    can't do better without the 7-credit catch_all check). Never iterates people.
+    """
     log: list[dict] = []
     credits = 0
     mx = _mx_ok(domain)
@@ -276,33 +300,47 @@ async def _pick_contact(cfg, domain, people, page_emails, max_people, max_patter
     async def verify(email):
         nonlocal credits
         if not mx:
-            return {"result": "invalid", "deliverable": False, "score": "bad", "credits_used": 0}
+            return {"result": "invalid_nomx", "deliverable": False, "score": None, "credits_used": 0}
         v = await verify_email_mailin(email)
         credits += int(v.get("credits_used") or 0)
         log.append({"email": email, "result": v.get("result"), "score": v.get("score")})
         return v
 
-    # 1) named senior people, best-ranked first
-    for person in people[:max_people]:
-        # on-page email that matches this person = strongest signal, verify it first
-        cands: list[str] = []
-        for e in page_emails:
-            lp = e.split("@")[0]
-            if lp not in _GENERIC_LP and _local_matches_name(lp, person["name"]):
-                cands.append(e)
-        cands += [p for p in _patterns(person["name"], domain) if p not in cands]
-        for email in cands[:max_patterns]:
+    def ok(v):  # deliverable, or a catch-all we accept as-is
+        return v.get("deliverable") is True or v.get("result") == "catch_all"
+
+    def hit(email, person, v):
+        conf = (0.9 if v.get("score") == "good" else 0.75) if person else 0.5
+        return {"email": email, "person": person, "email_status": v.get("result"),
+                "confidence": conf}, credits, log
+
+    # Step 0 — FREE pattern: the highest-ranked person who has a name-matching
+    # on-page email is already published; confirm with one verify.
+    for person in people[:5]:
+        match = next((e for e in page_emails if e.split("@")[0] not in _GENERIC_LP
+                      and _local_matches_name(e.split("@")[0], person["name"])), None)
+        if match:
+            v = await verify(match)
+            if ok(v):
+                return hit(match, person, v)
+            break  # a published personal address that won't verify => domain is
+                   # verification-resistant; go straight to probe/bail, don't loop.
+
+    # Step 1 — PROBE the single top person to learn the domain pattern.
+    top = people[0] if people else None
+    if top:
+        for email in _patterns(top["name"], domain)[:max_patterns]:
             v = await verify(email)
-            if v.get("deliverable") is True:
-                return {"email": email, "person": person, "email_status": v.get("result"),
-                        "confidence": 0.9 if v.get("score") == "good" else 0.75}, credits, log
-    # 2) fallback: a verified generic company mailbox (no person)
-    for lp in _GENERIC_TRY:
-        email = f"{lp}@{domain}"
-        v = await verify(email)
-        if v.get("deliverable") is True:
-            return {"email": email, "person": None, "email_status": v.get("result"),
-                    "confidence": 0.5}, credits, log
+            if ok(v):
+                return hit(email, top, v)
+        # Step 2 — all patterns invalid for a real senior person => the DOMAIN
+        # rejects verification. Others share the pattern, so we do NOT try them.
+
+    # Step 3 — generic fallback: two mailboxes, not seven.
+    for lp in ("info", "contact"):
+        v = await verify(f"{lp}@{domain}")
+        if ok(v):
+            return hit(f"{lp}@{domain}", None, v)
     return None, credits, log
 
 
@@ -311,9 +349,10 @@ async def _find_async(lead: dict, cost_mode: str, cfg: CompanyFinderConfig) -> d
     nodes: list[str] = []
     company = lead.get("company") or lead.get("company_name")
     profile_url = lead.get("clutch_profile_url")
-    # cost_mode drives how hard we try (each Mailin verify = 1 credit).
-    max_people = 3 if cost_mode == "high" else 1
-    max_patterns = 5 if cost_mode == "high" else 3
+    # We never iterate PEOPLE (the pattern is per-domain; one probe suffices).
+    # cost_mode only controls how many pattern hypotheses the probe tries before
+    # bailing — each is 1 Mailin credit.
+    max_patterns = 4 if cost_mode == "high" else 3
 
     def result(best, cost, evidence, status):
         return {"best_email": best, "status": status.value, "cost_usd": round(cost, 6),
@@ -332,7 +371,7 @@ async def _find_async(lead: dict, cost_mode: str, cfg: CompanyFinderConfig) -> d
         people, page_emails, psrc = await _find_people(client, cfg, domain, company)
 
         nodes.append("verify_contact")
-        best, credits, vlog = await _pick_contact(cfg, domain, people, page_emails, max_people, max_patterns)
+        best, credits, vlog = await _pick_contact(cfg, domain, people, page_emails, max_patterns)
 
     evidence = {"domain": domain, "domain_source": dsrc, "people_source": psrc,
                 "people": [{"name": p["name"], "title": p["title"]} for p in people[:8]],
