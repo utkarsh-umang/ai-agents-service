@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ai_agents.agents.email_finder.graph import build_graph, run_single_async  # noqa: E402
 from ai_agents.agents.email_finder.guest_finder import find_guest_email  # noqa: E402
+from ai_agents.agents.email_finder.company_finder import find_company_contact  # noqa: E402
 from ai_agents.agents.email_finder.state import LeadStatus, SourceType  # noqa: E402
 
 LMS_API = os.environ.get("LMS_API_URL", "http://localhost:8000").rstrip("/")
@@ -111,6 +112,44 @@ def _queue_item_to_guest_lead(item: dict) -> dict:
     }
 
 
+def _queue_item_to_company_lead(item: dict) -> dict:
+    """Queue item -> the company-as-lead dict the Clutch contact resolver needs."""
+    return {
+        "company": item.get("company_name"),
+        "clutch_profile_url": item.get("clutch_profile_url"),
+        "website": item.get("website"),
+    }
+
+
+def _company_result_payload(item: dict, state: dict, cost_mode: str) -> dict:
+    """Like _result_payload, but a company lead's result also carries WHO the
+    address belongs to (the resolver picked one senior person) and the verifier's
+    deliverability verdict."""
+    best = state.get("best_email") or {}
+    email = best.get("email") if isinstance(best, dict) else None
+    found = state.get("status") == LeadStatus.EMAIL_FOUND.value and bool(email)
+    failed = state.get("status") == LeadStatus.FAILED.value
+    name = (best.get("person_name") or "").strip()
+    first, last = (name.split(" ", 1) + [""])[:2] if name else ("", "")
+    return {
+        "lead_id": item["lead_id"],
+        "type": "email",
+        "cost_mode": cost_mode,
+        "status": "found" if found else ("failed" if failed else "not_found"),
+        "value": email if found else None,
+        "confidence": best.get("confidence") if found else None,
+        "provider": PROVIDER,
+        "cost_incurred": round(float(state.get("cost_usd") or 0.0), 6),
+        "evidence": state.get("evidence"),
+        # company-lead extras (person the address belongs to + verifier verdict)
+        "person_first_name": (first or None) if found else None,
+        "person_last_name": (last or None) if found else None,
+        "person_job_title": (best.get("person_title") or None) if found else None,
+        "person_seniority": (best.get("seniority") or None) if found else None,
+        "email_status": (best.get("email_status") or None) if found else None,
+    }
+
+
 def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
     best = state.get("best_email") or {}
     email = best.get("email") if isinstance(best, dict) else None
@@ -175,8 +214,18 @@ async def process_page(
             # Hold the concurrency slot OUTSIDE the budget timer — a lead
             # queued behind others must not burn budget while waiting. The
             # inner call gets a fresh single-use semaphore that never blocks.
+            # Routing: a Clutch company-lead (has a profile URL, no person/site)
+            # goes to the company-contact resolver; a tagged podscan lead to the
+            # guest finder; everything else to the crawl graph.
+            is_company = bool(item.get("clutch_profile_url"))
             async with semaphore:
-                if item.get("lead_tag"):
+                if is_company:
+                    # Sync (drives Crawl4AI + async I/O on its own loop) -> thread.
+                    state = await asyncio.wait_for(
+                        asyncio.to_thread(find_company_contact, _queue_item_to_company_lead(item), cost_mode),
+                        timeout=PER_LEAD_BUDGET_S,
+                    )
+                elif item.get("lead_tag"):
                     # Tagged (podscan) lead -> the search-first guest finder.
                     # It's sync (drives Crawl4AI on a private loop), so run it in
                     # a thread to keep this event loop free.
@@ -200,7 +249,8 @@ async def process_page(
                         ),
                         timeout=PER_LEAD_BUDGET_S,
                     )
-            await post_result(_result_payload(item, state, cost_mode), item)
+            payload = (_company_result_payload if is_company else _result_payload)(item, state, cost_mode)
+            await post_result(payload, item)
         except asyncio.TimeoutError:
             label = item.get("youtube_channel_name") or item["lead_id"]
             print(f"[worker]   {label}: exceeded {PER_LEAD_BUDGET_S:.0f}s budget — recording failed")
