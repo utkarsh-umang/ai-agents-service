@@ -215,9 +215,15 @@ async def process_page(
             # queued behind others must not burn budget while waiting. The
             # inner call gets a fresh single-use semaphore that never blocks.
             # Routing: a Clutch company-lead (has a profile URL, no person/site)
-            # goes to the company-contact resolver; a tagged podscan lead to the
-            # guest finder; everything else to the crawl graph.
+            # goes to the company-contact resolver; a podscan GUEST (a tagged
+            # person to search for by name+company) to the guest finder;
+            # everything else — including a podscan HOST (the podcast itself, a
+            # site to crawl, no person) — to the crawl graph.
             is_company = bool(item.get("clutch_profile_url"))
+            # podscan-host carries lead_tag='podcast_host' but no person, so it
+            # must NOT go to the person-search guest finder — the crawl graph
+            # scrapes its website for the show's email instead.
+            is_guest = bool(item.get("lead_tag")) and item.get("lead_tag") != "podcast_host"
             async with semaphore:
                 if is_company:
                     # Sync (drives Crawl4AI + async I/O on its own loop) -> thread.
@@ -225,7 +231,7 @@ async def process_page(
                         asyncio.to_thread(find_company_contact, _queue_item_to_company_lead(item), cost_mode),
                         timeout=PER_LEAD_BUDGET_S,
                     )
-                elif item.get("lead_tag"):
+                elif is_guest:
                     # Tagged (podscan) lead -> the search-first guest finder.
                     # It's sync (drives Crawl4AI on a private loop), so run it in
                     # a thread to keep this event loop free.
