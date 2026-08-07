@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
 
 import httpx
@@ -171,6 +172,31 @@ def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
         # this attempt offline — no re-search, no re-scrape.
         "evidence": state.get("evidence"),
     }
+
+
+def _reap_orphaned_browsers() -> None:
+    """Kill any lingering Crawl4AI/Playwright chromium processes.
+
+    Crawl nodes wrap the browser in `async with AsyncWebCrawler(...)`, which
+    closes it on a clean exit — but when a lead hits the PER_LEAD_BUDGET_S
+    timeout, asyncio cancels the task mid-navigation and the context manager
+    can't unwind, so the headless-chromium subprocess is orphaned. Left alone
+    these accumulate (the CLAUDE.md 'leaked headless browser pegs a core'
+    warning) and eventually exhaust the box, which is what turned crawls into
+    burst 'Proxy direct failed' errors.
+
+    Only safe to call BETWEEN pages: process_page awaits every lead before it
+    returns, so no crawl is active and every matching process is an orphan.
+    Path-scoped to Playwright's own chromium build, so a user's Chrome/Brave
+    is never touched. Best-effort — pkill exit 1 just means nothing to reap."""
+    try:
+        subprocess.run(
+            ["pkill", "-f", "ms-playwright/chromium"],
+            capture_output=True,
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001 — reaping must never break the loop
+        print(f"[worker] browser reap skipped: {type(exc).__name__}: {exc}")
 
 
 async def _heartbeat(client: httpx.AsyncClient, state: str, detail: str | None = None, in_flight: int = 0) -> None:
@@ -360,6 +386,10 @@ async def main() -> None:
                                  f"processing {len(items)} leads", len(items))
                 await process_page(client, items, args.cost_mode, args.concurrency)
                 pages_done += 1
+                # Between pages, no crawl is in flight — reap any chromium the
+                # page's timed-out leads orphaned so browsers can't accumulate
+                # across pages and exhaust the machine.
+                _reap_orphaned_browsers()
 
             except HardBlock as exc:
                 reason = f"Email finder paused: {exc}"
