@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LMS ICP classification worker — launchd agent.
+
+  Polls the LMS for lists marked "Classify" in the UI and drains them (crawl +
+  gpt-4o-mini + write the verdict back). Idle-cheap when nothing is requested
+  (long-poll every ~15s). Runs only when the user has requested a list, so it's
+  safe to keep loaded.
+
+  Install:
+    cp scripts/com.scalebrandslab.lms-classification-worker.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.scalebrandslab.lms-classification-worker.plist
+
+  Stop / uninstall:
+    launchctl bootout gui/$(id -u)/com.scalebrandslab.lms-classification-worker
+
+  Concurrency 4: the classifier crawls 2 pages/lead on ONE reused browser, so
+  it's lighter than the finder. On this 11-core laptop, keep it modest if the
+  enrichment worker is also running (both crawl). KeepAlive restarts after
+  crashes and laptop wake. Logs: ~/Library/Logs/lms-classification-worker.log.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.scalebrandslab.lms-classification-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/utkarshumang/my_projects/ai-agents-service/scripts/run_classification_worker.sh</string>
+    <string>--concurrency</string>
+    <string>4</string>
+    <string>--limit</string>
+    <string>50</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/utkarshumang/Library/Logs/lms-classification-worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/utkarshumang/Library/Logs/lms-classification-worker.log</string>
+</dict>
+</plist>
