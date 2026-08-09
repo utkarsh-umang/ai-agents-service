@@ -58,6 +58,11 @@ class DiscoveryOutput(BaseModel):
     discovery_meta: DiscoveryMeta = Field(default_factory=DiscoveryMeta)
     errors: list[str] = Field(default_factory=list)
     nodes_executed_delta: list[str] = Field(default_factory=lambda: ["url_discovery"])
+    # Emails/FB links harvested from the homepage HTML that discovery already
+    # fetched for link extraction — so the homepage isn't crawled a second time
+    # as the first fan-out page. Merged into the same reducers crawl_page feeds.
+    homepage_candidates: list[EmailCandidate] = Field(default_factory=list)
+    homepage_fb_links: list[str] = Field(default_factory=list)
 
 
 class CrawlPageInput(BaseModel):

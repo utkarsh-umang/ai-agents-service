@@ -10,6 +10,7 @@ import httpx
 from crawl4ai import CacheMode, CrawlerRunConfig
 
 from ai_agents.agents.email_finder.nodes import browser_pool
+from ai_agents.agents.email_finder.nodes.page_extract import build_page_candidates
 
 from ai_agents.agents.email_finder.io.contract_models import DiscoveryInput, DiscoveryMeta, DiscoveryOutput
 from ai_agents.core.llm import langfuse
@@ -149,26 +150,33 @@ def _filter_scored_sitemap(urls: list[str], origin: str) -> list[str]:
     return [u for u, _ in ranked]
 
 
-async def _homepage_same_origin_links(homepage: str, _trace_id: str) -> tuple[list[str], list[str]]:
+async def _homepage_same_origin_links(
+    homepage: str, _trace_id: str
+) -> tuple[list[str], list[str], str, str]:
+    """Crawl the homepage once and return (scored same-origin links, errors,
+    raw_html, markdown). The HTML/markdown are handed back so the caller can
+    harvest emails from this same fetch instead of re-crawling the homepage as
+    the first fan-out page."""
     errors: list[str] = []
     hrefs: list[str] = []
-    run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, page_timeout=60000)
+    run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, page_timeout=30000)
     try:
         # Shared browser (browser_pool) — no per-lead Chromium launch for the
         # homepage crawl, nothing to orphan on cancel.
         result = await browser_pool.crawl(homepage, run_conf)
     except Exception as e:
         errors.append(f"homepage_crawl: {e}")
-        return [], errors
+        return [], errors, "", ""
 
     if not result.success:
         errors.append(result.error_message or "homepage_crawl_failed")
-        return [], errors
+        return [], errors, "", ""
 
+    raw_html = result.html or ""
     md_extra = ""
     if result.markdown:
         md_extra = getattr(result.markdown, "raw_markdown", None) or str(result.markdown)
-    html = (result.html or "") + "\n" + (md_extra or "")
+    html = raw_html + "\n" + (md_extra or "")
     for m in re.finditer(r'href\s*=\s*"([^"]+)"', html, re.I):
         hrefs.append(m.group(1))
     for m in re.finditer(r"href\s*=\s*'([^']+)'", html, re.I):
@@ -197,20 +205,28 @@ async def _homepage_same_origin_links(homepage: str, _trace_id: str) -> tuple[li
         seen.add(u)
         scored.append((u, _score_url(u)))
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [u for u, _ in scored], errors
+    return [u for u, _ in scored], errors, raw_html, md_extra
 
 
 def _build_scrape_plan(homepage: str, sitemap_ranked: list[str], home_ranked: list[str], max_urls: int) -> list[str]:
-    """Homepage first; merge unique by score heuristic."""
+    """Merge unique high-value sub-pages by score heuristic.
+
+    The homepage is deliberately NOT in the plan: discovery already crawled it
+    for links and harvests its emails from that same fetch, so re-crawling it
+    here would be a wasted navigation. We also drop it if it resurfaces as a
+    discovered link.
+    """
     out: list[str] = []
     seen: set[str] = set()
+    homepage_key = (homepage.rstrip("/") + "/") if not homepage.endswith("/") else homepage
 
     def push(u: str) -> None:
+        # Skip the homepage in either trailing-slash form — already harvested.
+        if u.rstrip("/") == homepage_key.rstrip("/"):
+            return
         if u not in seen:
             seen.add(u)
             out.append(u)
-
-    push(homepage.rstrip("/") + "/" if not homepage.endswith("/") else homepage)
 
     # interleave high-value from both sources
     i, j = 0, 0
@@ -265,11 +281,17 @@ async def _run_discovery_async(inp: DiscoveryInput, parent_trace) -> DiscoveryOu
     span_sm.end()
 
     span_home = parent_trace.span(name="homepage_links")
-    home_links, h_err = await _homepage_same_origin_links(homepage, inp.trace_id)
+    home_links, h_err, home_html, home_md = await _homepage_same_origin_links(homepage, inp.trace_id)
     span_home.end()
     meta.homepage_links_found = len(home_links)
     meta.strategies.append("homepage_links")
     errors.extend(h_err)
+
+    # Harvest emails from the homepage HTML we just fetched (instead of crawling
+    # the homepage again as a fan-out page). Same extractor crawl_page uses.
+    homepage_candidates, homepage_fb_links = build_page_candidates(
+        home_html, home_md, homepage, bool(inp.lead.social_links.facebook)
+    )
 
     ranked_sm = filtered
     ranked_home = [(u, _score_url(u)) for u in home_links]
@@ -288,12 +310,20 @@ async def _run_discovery_async(inp: DiscoveryInput, parent_trace) -> DiscoveryOu
         },
     )
 
-    return DiscoveryOutput(scrape_plan=plan, discovery_meta=meta, errors=errors)
+    return DiscoveryOutput(
+        scrape_plan=plan,
+        discovery_meta=meta,
+        errors=errors,
+        homepage_candidates=homepage_candidates,
+        homepage_fb_links=homepage_fb_links,
+    )
 
 
 async def discover_urls_node_async(state: dict) -> dict:
     """Graph node: populate scrape_plan + discovery_meta."""
     from ai_agents.agents.email_finder.adapters import discovery_input_from_state
+
+    from ai_agents.agents.email_finder.adapters import candidates_to_dicts
 
     inp = discovery_input_from_state(state)
     parent = langfuse.trace(id=inp.trace_id, name="email_finder", session_id="email_finder")
@@ -308,4 +338,8 @@ async def discover_urls_node_async(state: dict) -> dict:
         "errors": out.errors,
         "nodes_executed": out.nodes_executed_delta,
         "status": state.get("status", "pending"),
+        # Homepage emails/FB links harvested from discovery's own fetch, merged
+        # into the same additive reducers the fan-out crawl_page workers feed.
+        "website_scrape_candidates": candidates_to_dicts(out.homepage_candidates),
+        "scraped_fb_links": out.homepage_fb_links,
     }

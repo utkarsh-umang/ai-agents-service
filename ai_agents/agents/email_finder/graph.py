@@ -154,7 +154,11 @@ def route_after_discover(state: EmailFinderGraphState) -> str | list[Send]:
                 "url": u,
                 "lead": lead,
                 "trace_id": tid,
-                "page_timeout_ms": 60000,
+                # 30s: a page that hasn't responded by then is a slow/hanging
+                # site, not a slow-but-good one — responsive contact/about pages
+                # answer in a few seconds. Caps the per-lead crawl tail so slow
+                # sites don't eat PER_LEAD_BUDGET_S. (was 60s)
+                "page_timeout_ms": 30000,
             },
         )
         for u in plan
