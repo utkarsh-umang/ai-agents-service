@@ -33,8 +33,8 @@ from typing import Any
 from crawl4ai import AsyncWebCrawler, BrowserConfig
 
 # One Chromium serving up to this many concurrent pages. Worker lead-concurrency
-# x fan-out (URLs/lead) sets real demand (2 x 5 = 10 today); this ceiling keeps
-# page count bounded if lead-concurrency is raised later.
+# x fan-out (URLs/lead) sets real demand (~10 at concurrency 2); this ceiling
+# keeps page count bounded if lead-concurrency is raised on a beefier host.
 MAX_CONCURRENT_PAGES = 12
 
 # In-browser backstop: recycle pages after this many navigations to bound
