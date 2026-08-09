@@ -41,7 +41,7 @@ from ai_agents.agents.email_finder.state import LeadStatus, SourceType
 
 def run_canonical_builder(state: EmailFinderGraphState) -> dict[str, Any]:
     st = source_type_from_state(state)
-    return canonical_builder_to_graph_dict(state["raw_row"], st)
+    return canonical_builder_to_graph_dict(state["raw_row"], st, state.get("source"))
 
 
 def _youtube_enabled(state: EmailFinderGraphState) -> bool:
