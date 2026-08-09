@@ -45,7 +45,12 @@ async def main() -> None:
             try:
                 r = await client.get(f"{LMS_API}/api/v1/classification/status",
                                      params={"batch_id": batch_id})
-                return bool(r.json().get("classify_requested"))
+                j = r.json()
+                # Global pause (user closed the laptop) halts mid-list too, not
+                # just between lists — same status call already carries it.
+                if j.get("paused"):
+                    return False
+                return bool(j.get("classify_requested"))
             except Exception:
                 return True  # a blip shouldn't halt a long run
 
