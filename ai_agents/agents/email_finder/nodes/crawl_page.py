@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+from crawl4ai import CacheMode, CrawlerRunConfig
 
 # Absolute wall-clock cap per crawl attempt. crawl4ai's own `page_timeout` covers
 # normal slow pages, but a hung browser/connection can blow past it — this asyncio
 # backstop guarantees we abandon a site after ~3 min instead of stalling the run.
 _CRAWL_HARD_TIMEOUT_S = 180
 
+from ai_agents.agents.email_finder.nodes import browser_pool
 from ai_agents.agents.email_finder.adapters import crawl_input_from_worker_state, candidates_to_dicts
 from ai_agents.agents.email_finder.io.contract_models import CrawlPageInput, CrawlPageOutput
 from ai_agents.agents.email_finder.nodes.email_utils import confidence_for_email, enrich_confidence, filter_emails
@@ -74,9 +75,11 @@ def _extract_fb_links(html: str) -> list[str]:
     return out
 
 
-async def _crawl_once(browser_conf, run_conf, url: str):
-    async with AsyncWebCrawler(config=browser_conf) as crawler:
-        return await crawler.arun(url=url, config=run_conf)
+async def _crawl_once(run_conf, url: str):
+    # Runs on the process-wide shared browser (browser_pool) — no per-URL
+    # Chromium launch, and nothing to orphan when a crawl is cancelled at the
+    # lead's budget deadline.
+    return await browser_pool.crawl(url, run_conf)
 
 
 async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
@@ -87,7 +90,6 @@ async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
     )
     span = trace.span(name="crawl_page", metadata={"crawl_url": inp.url})
 
-    browser_conf = BrowserConfig(headless=True)
     run_conf = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         page_timeout=inp.page_timeout_ms,
@@ -98,7 +100,7 @@ async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
     for attempt in range(1, 3):  # 2 attempts
         try:
             result = await asyncio.wait_for(
-                _crawl_once(browser_conf, run_conf, inp.url),
+                _crawl_once(run_conf, inp.url),
                 timeout=_CRAWL_HARD_TIMEOUT_S,
             )
             if result.success:

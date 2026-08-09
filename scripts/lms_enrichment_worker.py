@@ -39,6 +39,7 @@ import httpx
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ai_agents.agents.email_finder.graph import build_graph, run_single_async  # noqa: E402
+from ai_agents.agents.email_finder.nodes import browser_pool  # noqa: E402
 from ai_agents.agents.email_finder.guest_finder import find_guest_email  # noqa: E402
 from ai_agents.agents.email_finder.company_finder import find_company_contact  # noqa: E402
 from ai_agents.agents.email_finder.state import LeadStatus, SourceType  # noqa: E402
@@ -55,6 +56,12 @@ TRANSIENT_BACKOFF_S = 20.0
 # whole pipeline: a lead that exceeds this is recorded "failed" and the
 # page moves on. Generous — a normal lead with heavy crawling takes 1-3min.
 PER_LEAD_BUDGET_S = 300.0
+
+# Fully recycle the shared crawl browser (browser_pool) every N pages, between
+# pages where no crawl is in flight — a deterministic memory valve on top of the
+# in-browser page recycle. Replaces the old pkill reaper; the persistent browser
+# no longer orphans on cancel, so this is housekeeping, not leak-control.
+RECYCLE_EVERY_PAGES = 10
 
 # Signatures of errors that can never self-heal — pausing for a human is
 # the only correct response. Matched against the exception's full repr.
@@ -174,29 +181,26 @@ def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
     }
 
 
-def _reap_orphaned_browsers() -> None:
-    """Kill any lingering Crawl4AI/Playwright chromium processes.
+def _reap_stale_browsers() -> None:
+    """Clear any Crawl4AI/Playwright chromium left by a PREVIOUS worker instance.
 
-    Crawl nodes wrap the browser in `async with AsyncWebCrawler(...)`, which
-    closes it on a clean exit — but when a lead hits the PER_LEAD_BUDGET_S
-    timeout, asyncio cancels the task mid-navigation and the context manager
-    can't unwind, so the headless-chromium subprocess is orphaned. Left alone
-    these accumulate (the CLAUDE.md 'leaked headless browser pegs a core'
-    warning) and eventually exhaust the box, which is what turned crawls into
-    burst 'Proxy direct failed' errors.
+    Steady-state there are no orphans: the finder shares one persistent browser
+    (browser_pool) that a cancelled crawl can't orphan, and a clean shutdown
+    closes it. But launchd stops the daemon with SIGTERM/SIGKILL, which runs no
+    Python cleanup — so a hard kill can leave the previous instance's single
+    browser behind. Running this ONCE at startup (before our pool is created)
+    guarantees at most one live browser at any time across restarts.
 
-    Only safe to call BETWEEN pages: process_page awaits every lead before it
-    returns, so no crawl is active and every matching process is an orphan.
-    Path-scoped to Playwright's own chromium build, so a user's Chrome/Brave
-    is never touched. Best-effort — pkill exit 1 just means nothing to reap."""
+    Path-scoped to Playwright's own chromium build so a user's Chrome/Brave is
+    untouched. Best-effort — pkill exit 1 just means nothing to reap."""
     try:
         subprocess.run(
             ["pkill", "-f", "ms-playwright/chromium"],
             capture_output=True,
             timeout=15,
         )
-    except Exception as exc:  # noqa: BLE001 — reaping must never break the loop
-        print(f"[worker] browser reap skipped: {type(exc).__name__}: {exc}")
+    except Exception as exc:  # noqa: BLE001 — startup reap must never break boot
+        print(f"[worker] startup browser reap skipped: {type(exc).__name__}: {exc}")
 
 
 async def _heartbeat(client: httpx.AsyncClient, state: str, detail: str | None = None, in_flight: int = 0) -> None:
@@ -356,8 +360,13 @@ async def main() -> None:
           f"page={args.limit} concurrency={args.concurrency} "
           f"mode={'once' if args.once else 'daemon'}")
 
+    # Clear any browser a previous (hard-killed) instance left behind before we
+    # start our own persistent one.
+    _reap_stale_browsers()
+
     pages_done = 0
-    async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT_S) as client:
+    client = httpx.AsyncClient(timeout=CLIENT_TIMEOUT_S)
+    try:
         while True:
             if args.pages is not None and pages_done >= args.pages:
                 print(f"[worker] page limit ({args.pages}) reached — done")
@@ -386,10 +395,11 @@ async def main() -> None:
                                  f"processing {len(items)} leads", len(items))
                 await process_page(client, items, args.cost_mode, args.concurrency)
                 pages_done += 1
-                # Between pages, no crawl is in flight — reap any chromium the
-                # page's timed-out leads orphaned so browsers can't accumulate
-                # across pages and exhaust the machine.
-                _reap_orphaned_browsers()
+                # Between pages, no crawl is in flight. The shared browser is
+                # persistent (no per-crawl orphans anymore), so this is just a
+                # periodic full recycle to bound memory — not leak-control.
+                if pages_done % RECYCLE_EVERY_PAGES == 0:
+                    await browser_pool.recycle_crawler()
 
             except HardBlock as exc:
                 reason = f"Email finder paused: {exc}"
@@ -411,6 +421,12 @@ async def main() -> None:
                 if args.once:
                     sys.exit(1)
                 await asyncio.sleep(TRANSIENT_BACKOFF_S)
+    finally:
+        # Clean shutdown (once-mode / page-limit / Ctrl-C): close the shared
+        # browser so it isn't orphaned. (A SIGKILL skips this — the startup
+        # reap covers that case on the next boot.)
+        await browser_pool.close_crawler()
+        await client.aclose()
 
 
 if __name__ == "__main__":

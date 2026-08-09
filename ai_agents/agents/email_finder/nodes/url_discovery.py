@@ -7,7 +7,9 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+from crawl4ai import CacheMode, CrawlerRunConfig
+
+from ai_agents.agents.email_finder.nodes import browser_pool
 
 from ai_agents.agents.email_finder.io.contract_models import DiscoveryInput, DiscoveryMeta, DiscoveryOutput
 from ai_agents.core.llm import langfuse
@@ -150,11 +152,11 @@ def _filter_scored_sitemap(urls: list[str], origin: str) -> list[str]:
 async def _homepage_same_origin_links(homepage: str, _trace_id: str) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     hrefs: list[str] = []
-    browser_conf = BrowserConfig(headless=True)
     run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, page_timeout=60000)
     try:
-        async with AsyncWebCrawler(config=browser_conf) as crawler:
-            result = await crawler.arun(url=homepage, config=run_conf)
+        # Shared browser (browser_pool) — no per-lead Chromium launch for the
+        # homepage crawl, nothing to orphan on cancel.
+        result = await browser_pool.crawl(homepage, run_conf)
     except Exception as e:
         errors.append(f"homepage_crawl: {e}")
         return [], errors
