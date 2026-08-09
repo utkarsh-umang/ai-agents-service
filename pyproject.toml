@@ -6,41 +6,51 @@ authors = []
 readme = "README.md"
 packages = [{ include = "ai_agents" }]
 
+# Dependencies are split into a small core plus per-agent extras, so a consumer
+# installs only what its agent needs. Consumers request them explicitly, e.g.
+#   ai-agents-service = { git = "...", branch = "develop", extras = ["thumbnail"] }
+# For local development of this repo, install everything: `poetry install --all-extras`.
 [tool.poetry.dependencies]
 python = "^3.10"
-langchain = "*"
-langchain-core = "*"
-langchain-openai = "*"
-openai = "^2.30.0"
-python-dotenv = "*"
-google-genai = "^1.70.0"
-pillow = "^12.2.0"
+
+# ── Core ──────────────────────────────────────────────────────────────────
+# Unavoidable for `import ai_agents`: __init__.py eagerly imports the thumbnail
+# agent, so its three deps are core rather than an extra. pydantic and
+# typing-extensions are imported directly by email_finder's data contracts;
+# they arrive transitively too, but production code importing them explicitly
+# should not depend on someone else's resolver.
 httpx = "^0.28.1"
-langgraph = "^1.1.6"
-litellm = "^1.83.4"
-langfuse = "^2.0"
-nest-asyncio = "*"
-crawl4ai = "^0.8.6"
-google-api-python-client = "^2.196.0"
-google-auth = "^2.53.0"
-google-auth-oauthlib = "^1.4.0"
-gspread = "^6.2.1"
-pandas = "<3"
-lxml = "<6"
-pymongo = "^4.17.0"
-motor = "^3.7.1"
-fastapi = "^0.136.3"
-uvicorn = "^0.48.0"
-beautifulsoup4 = "^4.14.3"
-selenium = "^4.44.0"
-webdriver-manager = "^4.1.1"
-firecrawl-py = "^4.28.0"
-email-validator = "^2.3.0"
-aiofiles = "^25.1.0"
-aiosqlite = "^0.22.1"
-ipykernel = "^7.2.0"
-jupyter-client = "^8.8.0"
-jupyter-core = "^5.9.1"
+openai = "^2.30.0"
+google-genai = "^1.70.0"
+pydantic = "^2.9"
+typing-extensions = "^4.12"
+python-dotenv = "*"
+
+# ── email_finder (extra: finder) ──────────────────────────────────────────
+# crawl4ai transitively supplies lxml, beautifulsoup4, aiofiles, aiosqlite,
+# pillow, requests and playwright — previously declared here by hand, now left
+# to it. requests stays explicit because guest_finder.py imports it directly.
+crawl4ai = { version = "^0.8.6", optional = true }
+litellm = { version = "^1.83.4", optional = true }
+langgraph = { version = "^1.1.6", optional = true }
+langfuse = { version = "^2.0", optional = true }
+nest-asyncio = { version = "*", optional = true }
+requests = { version = "^2.32", optional = true }
+
+# ── personalization_writer (extra: personalization) ───────────────────────
+# This subtree is currently orphaned — graph.py runs asyncio.run(main()) at
+# module scope and uses non-package-relative imports, so it cannot be imported
+# as part of the installed package. Deps are declared so it is revivable;
+# langchain-groq was never declared at all despite llm_scorer.py importing it.
+langchain-core = { version = "*", optional = true }
+langchain-groq = { version = "*", optional = true }
+pillow = { version = "^12.2.0", optional = true }
+
+[tool.poetry.extras]
+# Empty by design: everything the thumbnail agent needs is already core.
+thumbnail = []
+finder = ["crawl4ai", "litellm", "langgraph", "langfuse", "nest-asyncio", "requests"]
+personalization = ["langchain-core", "langchain-groq", "pillow"]
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
