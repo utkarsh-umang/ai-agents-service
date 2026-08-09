@@ -1,5 +1,5 @@
 from pydantic import BaseModel, HttpUrl, Field
-from typing import List, Optional
+from typing import Optional
 from datetime import datetime
 
 # final AI output format

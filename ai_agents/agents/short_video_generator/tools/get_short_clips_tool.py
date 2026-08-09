@@ -1,5 +1,4 @@
 import re
-import os
 import json
 from datetime import timedelta
 
@@ -14,7 +13,6 @@ from langchain_core.messages import HumanMessage
 
 from contracts import *
 
-from faster_whisper import WhisperModel
 import yt_dlp
 from pathlib import Path
 
