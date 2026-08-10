@@ -32,6 +32,7 @@ import json
 import os
 import re
 import subprocess
+import unicodedata
 from typing import Any
 
 import httpx
@@ -108,8 +109,15 @@ def _mx_ok(domain: str) -> bool:
         return True  # don't punish on a dig failure — let Mailin decide
 
 
+def _ascii_fold(s: str) -> str:
+    """Strip accents so a name maps to the address its mailbox actually uses:
+    'Lütke' -> 'lutke', not 'ltke' (the naive [^a-z] strip dropped the ü and
+    silently produced tobi.ltke@ — a wrong, unverifiable guess)."""
+    return "".join(c for c in unicodedata.normalize("NFKD", s or "") if not unicodedata.combining(c))
+
+
 def _patterns(full_name: str, domain: str) -> list[str]:
-    parts = re.sub(r"[^a-z\s\-]", "", (full_name or "").lower()).split()
+    parts = re.sub(r"[^a-z\s\-]", "", _ascii_fold((full_name or "").lower())).split()
     if len(parts) < 2:
         return []
     f, l = parts[0], parts[-1]
@@ -127,7 +135,7 @@ def _patterns(full_name: str, domain: str) -> list[str]:
 
 
 def _local_matches_name(local: str, full_name: str) -> bool:
-    parts = re.sub(r"[^a-z\s\-]", "", (full_name or "").lower()).split()
+    parts = re.sub(r"[^a-z\s\-]", "", _ascii_fold((full_name or "").lower())).split()
     if len(parts) < 2:
         return False
     f, l = parts[0], parts[-1]

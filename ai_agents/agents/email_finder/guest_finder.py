@@ -195,10 +195,11 @@ def _build_evidence(prov: dict, ctx: dict) -> dict:
 
 
 # --- main --------------------------------------------------------------------
-def find_guest_email(lead: dict, cost_mode: str = "low",
-                     config: GuestFinderConfig | None = None) -> dict[str, Any]:
-    """lead keys: name, company, occupation, industry, website, linkedin,
-    twitter, instagram, podcast. Returns a graph-shaped state dict."""
+def _find_guest_email_search(lead: dict, cost_mode: str = "low",
+                             config: GuestFinderConfig | None = None) -> dict[str, Any]:
+    """Tier-1: the search-first pipeline — harvest emails off pages Serper
+    surfaces, LLM-rank, guard, free MX/SMTP verify. Keeps only addresses it
+    actually scrapes; it never guesses first.last@ (that's Tier-2)."""
     cfg = config or GuestFinderConfig()
     nodes: list[str] = []
     cost = 0.0
@@ -388,3 +389,172 @@ def find_guest_email(lead: dict, cost_mode: str = "low",
         logger.exception("guest_finder failed for %s", lead.get("name"))
         return {"best_email": None, "status": LeadStatus.FAILED.value,
                 "cost_usd": round(cost, 6), "nodes_executed": nodes, "errors": [str(exc)[:200]]}
+
+
+# --- Tier-2: pattern-generate + Mailin-verify --------------------------------
+# The search pipeline above keeps only emails it can SCRAPE. That structurally
+# misses the institutional tail: a professor / journalist / official whose
+# address (jane.doe@university.edu) is nowhere in a search snippet but follows
+# the org's obvious pattern. This tier resolves the guest's affiliation to a
+# mail domain, generates their own name-patterns, and VERIFIES each via Mailin —
+# exactly the guess-then-verify step proven on Clutch. Paid (Mailin credits), so
+# it runs only at cost_mode="high". A 50-lead pilot on leads Tier-1 had already
+# failed recovered 36% (22% Mailin-confirmed deliverable) at ~1.2 credits/lead.
+_ALT_SKIP_DOM = (
+    "linkedin.", "facebook.", "twitter.", "x.com", "instagram.", "tiktok.", "youtube.",
+    "wikipedia.", "podchaser.", "listennotes.", "apple.", "spotify.", "crunchbase.",
+    "muckrack.", "rocketreach", "zoominfo", "contactout", "signalhire", "spokeo",
+    "whitepages", "amazon.", "goodreads.", "imdb.", "yelp.", "glassdoor.", "medium.com",
+    "substack.com", "google.", "gravatar.", "gmail.", "outlook.", "hotmail.", "yahoo.",
+    "icloud.", "proton", "aol.",
+)
+
+
+def _guest_domain_of(url: str) -> str:
+    return re.sub(r"^https?://", "", (url or "").lower()).split("/")[0].lstrip("www.").rstrip(".")
+
+
+def _serper_organic(cfg: GuestFinderConfig, q: str) -> list[dict]:
+    try:
+        return requests.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": cfg.serper_key, "Content-Type": "application/json"},
+            json={"q": q, "num": 10}, timeout=30,
+        ).json().get("organic", [])
+    except Exception:
+        return []
+
+
+def _resolve_guest_domain(cfg: GuestFinderConfig, company: str, website: str) -> tuple[str | None, str]:
+    """The guest's employer/affiliation web domain — from their own site if we
+    have one, else a Serper name-search for the company."""
+    if website:
+        d = _guest_domain_of(website)
+        if d and "." in d and not any(s in d for s in _ALT_SKIP_DOM):
+            return d, "website"
+    if company:
+        for o in _serper_organic(cfg, f"{company} official website"):
+            d = _guest_domain_of(o.get("link", ""))
+            if d and "." in d and not any(s in d for s in _ALT_SKIP_DOM):
+                return d, "serper"
+    return None, "unresolved"
+
+
+def _discover_mail_domain(cfg: GuestFinderConfig, company: str, web_domain: str) -> tuple[str, str]:
+    """The org's real MAIL domain, which is often NOT its website domain — a
+    Bloomberg journalist's site is bloomberg.com but their mailbox is
+    @bloomberg.net. Harvest published org addresses via Serper and, if a single
+    non-provider domain clearly dominates and differs from the web domain, prefer
+    it for pattern generation. Falls back to the web domain."""
+    counts: dict[str, int] = {}
+    web_stem = web_domain.split(".")[0]
+    for o in _serper_organic(cfg, f'"{company}" email "@"'):
+        blob = f"{o.get('title','')} {o.get('snippet','')} {o.get('link','')}"
+        for e in _EMAIL_RX.findall(blob):
+            dom = e.split("@")[-1].lower().rstrip(".")
+            if any(s in dom for s in _ALT_SKIP_DOM):
+                continue
+            # only trust an alternate that shares the company/web stem — avoids
+            # latching onto a vendor address that happens to co-occur.
+            stem = dom.split(".")[0]
+            if stem == web_stem or (len(web_stem) > 3 and web_stem in dom) or \
+               (company and stem in re.sub(r"[^a-z]", "", company.lower())):
+                counts[dom] = counts.get(dom, 0) + 1
+    if counts:
+        top = max(counts, key=counts.get)
+        if top != web_domain and counts[top] >= 2:
+            return top, "harvested_mail_domain"
+    return web_domain, "web_domain"
+
+
+def find_guest_email_by_pattern(lead: dict, cost_mode: str = "high",
+                                config: GuestFinderConfig | None = None) -> dict[str, Any]:
+    """Resolve the guest's affiliation -> mail domain, generate their own
+    address patterns, Mailin-verify each (name-matched published address first,
+    then patterns), keep the first deliverable / catch-all. Returns a
+    graph-shaped state dict. lead keys: name, company, website."""
+    from ai_agents.agents.email_finder.company_finder import _mx_ok, _patterns
+    from ai_agents.agents.email_finder.nodes.verify_email_mailin import verify_email_mailin_sync
+
+    cfg = config or GuestFinderConfig()
+    nodes = ["pattern_tier:resolve_domain"]
+    name = (lead.get("name") or "").strip()
+    company = (lead.get("company") or "").strip()
+    website = (lead.get("website") or "").strip()
+    max_patterns = 4 if cost_mode == "high" else 3
+    max_verify = max_patterns + 1  # + one name-matched harvest slot
+
+    if not cfg.serper_key or not name or not (company or website):
+        return _not_found(0.0, "pattern tier: missing name/affiliation/key", nodes)
+
+    web_domain, dsrc = _resolve_guest_domain(cfg, company, website)
+    if not web_domain:
+        return _not_found(0.001, f"pattern tier: {dsrc}", nodes, {"domain_source": dsrc})
+
+    nodes.append("pattern_tier:mail_domain")
+    domain, msrc = _discover_mail_domain(cfg, company, web_domain)
+    if not _mx_ok(domain):
+        return _not_found(0.002, f"pattern tier: {domain} has no MX", nodes,
+                          {"domain": domain, "domain_source": dsrc, "mail_domain_source": msrc})
+
+    # Free win: a published address on this domain that spells the guest's name.
+    ptoks = _person_tokens(name)
+    harvested: list[str] = []
+    for o in _serper_organic(cfg, f'"{name}" "@{domain}"'):
+        blob = f"{o.get('title','')} {o.get('snippet','')} {o.get('link','')}"
+        for e in _EMAIL_RX.findall(blob):
+            e = e.lower()
+            lp, _, dom = e.partition("@")
+            if domain in dom and lp not in _GENERIC_LP and any(t in lp for t in ptoks) and e not in harvested:
+                harvested.append(e)
+
+    patterns = [p for p in _patterns(name, domain)[:max_patterns] if p not in harvested]
+    candidates = (harvested + patterns)[:max_verify]
+
+    nodes.append("pattern_tier:verify")
+    credits = 0
+    vlog: list[dict] = []
+    cost = 0.002
+    for email in candidates:
+        v = verify_email_mailin_sync(email)
+        credits += int(v.get("credits_used") or 0)
+        result = v.get("result")
+        vlog.append({"email": email, "result": result, "score": v.get("score")})
+        cost += int(v.get("credits_used") or 0) * 0.0007
+        if v.get("deliverable") is True or result == "catch_all":
+            is_harvest = email in harvested
+            conf = 0.9 if (is_harvest and result != "catch_all") else (
+                0.75 if result != "catch_all" else 0.55)
+            evidence = {"domain": domain, "domain_source": dsrc, "mail_domain_source": msrc,
+                        "mailin_credits": credits, "verify_log": vlog}
+            return {
+                "best_email": {"email": email, "source": domain, "confidence": round(conf, 2),
+                               "email_status": result, "note": f"pattern-tier; verify={result}"},
+                "status": LeadStatus.EMAIL_FOUND.value,
+                "cost_usd": round(cost, 6), "nodes_executed": nodes, "evidence": evidence,
+            }
+    return _not_found(round(cost, 6),
+                      f"pattern tier: no candidate verified ({len(candidates)} tried)", nodes,
+                      {"domain": domain, "domain_source": dsrc, "mail_domain_source": msrc,
+                       "mailin_credits": credits, "verify_log": vlog})
+
+
+def find_guest_email(lead: dict, cost_mode: str = "low",
+                     config: GuestFinderConfig | None = None) -> dict[str, Any]:
+    """Guest email finder. Tier-1 is the free search pipeline; when
+    cost_mode="high" and Tier-1 comes up empty, fall through to the paid
+    pattern-generate + Mailin-verify tier. lead keys: name, company, occupation,
+    industry, website, linkedin, twitter, instagram, podcast."""
+    cfg = config or GuestFinderConfig()
+    state = _find_guest_email_search(lead, cost_mode, cfg)
+    if state.get("status") == LeadStatus.EMAIL_FOUND.value:
+        return state
+    if cost_mode != "high" or not (lead.get("company") or lead.get("website")):
+        return state
+    tier2 = find_guest_email_by_pattern(lead, cost_mode, cfg)
+    # Carry Tier-1's spend/trace onto whichever result we return.
+    base_cost = float(state.get("cost_usd") or 0.0)
+    base_nodes = state.get("nodes_executed") or []
+    tier2["cost_usd"] = round(base_cost + float(tier2.get("cost_usd") or 0.0), 6)
+    tier2["nodes_executed"] = base_nodes + (tier2.get("nodes_executed") or [])
+    return tier2

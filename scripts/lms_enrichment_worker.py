@@ -178,6 +178,10 @@ def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
         # Candidate context (guest finder) so a later logic change can re-score
         # this attempt offline — no re-search, no re-scrape.
         "evidence": state.get("evidence"),
+        # Verifier verdict when present (the pattern tier's Mailin result:
+        # "ok" | "catch_all"). Stored on lead.email_status; None for the free
+        # search tier, which does no paid verification.
+        "email_status": (best.get("email_status") if found else None),
     }
 
 
