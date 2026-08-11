@@ -1,1 +1,1 @@
-"""Filesystem, ffmpeg and storage helpers for the short_video_generator agent."""
+"""URL validation for the short_video_generator agent."""

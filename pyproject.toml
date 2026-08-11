@@ -42,9 +42,8 @@ requests = { version = "^2.32", optional = true }
 # langchain, langchain-openai and google-api-python-client were dropped from the
 # manifest when they were genuinely unused; this agent brings them back, so they
 # return as optional rather than core.
-# boto3 is here only because upload_to_s3 still lives in this repo. It leaves
-# with the media half, along with yt-dlp — see the Obsidian note
-# "Short Video Generator — As Built".
+# yt-dlp stays: it is still the transcript fallback (caption download), even
+# though the video download moved out with the media half.
 langchain = { version = "*", optional = true }
 langchain-core = { version = "*", optional = true }
 langchain-openai = { version = "*", optional = true }
@@ -54,7 +53,6 @@ google-api-python-client = { version = "^2.196.0", optional = true }
 youtube-transcript-api = { version = "^1.2.4", optional = true, python = ">=3.10,<3.15" }
 yt-dlp = { version = "^2026.7.4", optional = true }
 isodate = { version = "^0.7.2", optional = true }
-boto3 = { version = "^1.43.46", optional = true }
 
 [tool.poetry.extras]
 # Empty by design: everything the thumbnail agent needs is already core.
@@ -73,7 +71,6 @@ shortvideo = [
     "yt-dlp",
     "isodate",
     "requests",
-    "boto3",
 ]
 
 [build-system]
