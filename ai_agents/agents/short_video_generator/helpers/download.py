@@ -1,71 +1,74 @@
-import os
+"""Download a source video into a caller-supplied directory."""
+
+from __future__ import annotations
+
 from pathlib import Path
 
 import yt_dlp
-from dotenv import load_dotenv
 
-load_dotenv()
+from ai_agents.agents.short_video_generator.helpers.ffmpeg import ffmpeg_dir
 
-FFMPEG_PATH = os.path.normpath(os.getenv("FFMPEG_PATH"))
+# Default quality ceiling. Vertical short-form never needs more than 720p, and
+# capping here cuts roughly 2.5x off the bytes we download, store and re-upload
+# (~120 MB for a 20-minute source instead of ~1 GB at 1080p60).
+DEFAULT_MAX_HEIGHT = 720
 
-INPUT_DIR = Path("videos") / "input"
 
+def download_youtube_video(
+    url: str,
+    dest_dir: Path | str,
+    *,
+    max_height: int = DEFAULT_MAX_HEIGHT,
+    stem: str = "source",
+) -> Path:
+    """Download ``url`` into ``dest_dir`` and return the resulting file.
 
-def download_youtube_video(url: str) -> str:
+    Args:
+        url: A YouTube watch URL. Validate it first with
+            ``helpers.validate_links.is_valid_youtube_url``.
+        dest_dir: Directory to download into — pass a per-job workspace from
+            ``helpers.workspace.job_workspace``. Created if absent. Existing
+            files are left alone; this function never deletes anything.
+        max_height: Quality ceiling in pixels.
+        stem: Base filename; the container extension is chosen by yt-dlp.
+
+    Raises:
+        FileNotFoundError: if yt-dlp reported success but produced no file.
     """
-    Downloads a YouTube video into videos/input/.
-
-    Removes any existing videos in the folder before downloading.
-
-    Returns:
-        Path to the downloaded video.
-    """
-
-    INPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Remove old videos
-    for file in INPUT_DIR.iterdir():
-        if file.is_file():
-            file.unlink()
-
-    output_template = str(INPUT_DIR / "yt_video.%(ext)s")
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
 
     ydl_opts = {
-        "ffmpeg_location": FFMPEG_PATH,
-
-        # Best video + best audio
-        "format": "bv*+ba/b",
-
-        # Save as videos/input/yt_video.<ext>
-        "outtmpl": output_template,
-
-        # Always output mp4
+        # Best video at or below the ceiling, plus best audio; fall back to a
+        # single pre-muxed stream when no such pair exists.
+        "format": f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b",
         "merge_output_format": "mp4",
-
+        "outtmpl": str(dest / f"{stem}.%(ext)s"),
         "noplaylist": True,
-        "continuedl": True,
-        "overwrites": True,
+        "quiet": True,
+        "no_warnings": True,
     }
+
+    # Only set ffmpeg_location when we actually found ffmpeg; passing None lets
+    # yt-dlp fall back to PATH rather than erroring on an empty override.
+    location = ffmpeg_dir()
+    if location:
+        ydl_opts["ffmpeg_location"] = location
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
-    # Find the downloaded file
-    for file in INPUT_DIR.iterdir():
-        if file.is_file():
-            return str(file)
+    # Match on the stem we asked for rather than "whatever is in the directory",
+    # so a workspace holding other artefacts can't confuse the result.
+    produced = sorted(p for p in dest.glob(f"{stem}.*") if p.is_file())
+    if not produced:
+        raise FileNotFoundError(
+            f"yt-dlp reported success but produced no {stem}.* file in {dest}"
+        )
 
-    raise FileNotFoundError("Video download failed.")
-
-
-if __name__ == "__main__":
-    url = input("Enter YouTube URL: ").strip()
-
-    try:
-        video_path = download_youtube_video(url)
-
-        print("\nDownload successful!")
-        print(video_path)
-
-    except Exception as e:
-        print(f"\nError: {e}")
+    # With a merge, yt-dlp leaves the muxed .mp4 alongside nothing else; without
+    # one it may leave separate streams. Prefer the merged container.
+    for candidate in produced:
+        if candidate.suffix == ".mp4":
+            return candidate
+    return produced[0]

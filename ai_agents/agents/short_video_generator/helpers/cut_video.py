@@ -1,114 +1,93 @@
-import os
+"""Cut a source video into clips using ffmpeg."""
+
+from __future__ import annotations
+
 import subprocess
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Any
 
-from contracts import VideoAnalysis
-
-load_dotenv()
-
-FFMPEG_PATH = os.path.normpath(os.getenv("FFMPEG_PATH"))
-FFMPEG_EXE = os.path.join(FFMPEG_PATH, "ffmpeg.exe")
-
-OUTPUT_DIR = Path("videos/output")
+from ai_agents.agents.short_video_generator.helpers.ffmpeg import resolve_ffmpeg
 
 
-def create_clips(video_path: str, analysis) -> list[str]:
-    """
-    Create clips from a downloaded video using VideoAnalysis.
+def create_clips(
+    video_path: Path | str,
+    analysis: Any,
+    out_dir: Path | str,
+    *,
+    ffmpeg_bin: Path | str | None = None,
+) -> list[dict]:
+    """Cut one file per clip in ``analysis`` into ``out_dir``.
 
     Args:
-        video_path: Path to downloaded video.
-        analysis: VideoAnalysis object.
+        video_path: The downloaded source.
+        analysis: A ``VideoAnalysis`` (anything with ``.clips``).
+        out_dir: Directory to write clips into — pass a per-job workspace from
+            ``helpers.workspace.job_workspace``. Created if absent. Existing
+            files are left alone; this function never deletes anything.
+        ffmpeg_bin: Override the ffmpeg binary. Defaults to ``resolve_ffmpeg()``.
 
     Returns:
-        List of created clip paths.
+        One dict per clip, carrying the LLM's reasoning through alongside the
+        file. ``index`` is 0-based and stable, so callers can build a
+        deterministic, retry-safe storage key from it.
+
+    Note:
+        ``-c copy`` is a stream copy: near-instant and lossless, but cuts snap
+        to the nearest keyframe, so a clip can start a second or two off its
+        requested timestamp. Re-encoding would be frame-accurate at real CPU
+        cost. Stream copy is the deliberate v1 choice.
     """
+    source = Path(video_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"source video not found: {source}")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
-    # Remove old clips
-    for file in OUTPUT_DIR.glob("*"):
-        if file.is_file():
-            file.unlink()
+    binary = str(ffmpeg_bin) if ffmpeg_bin else str(resolve_ffmpeg())
+    suffix = source.suffix or ".mp4"
 
-    video_path = Path(video_path)
-    ext = video_path.suffix
+    results: list[dict] = []
 
-    results = []
-
-    print(f"Using video: {video_path.name}")
-
-    for i, clip in enumerate(analysis.clips, start=1):
-
-        output_file = OUTPUT_DIR / f"clip_{i}{ext}"
+    for index, clip in enumerate(analysis.clips):
+        output_file = out / f"clip_{index}{suffix}"
 
         command = [
-            FFMPEG_EXE,
+            binary,
             "-y",
             "-ss", clip.start_timestamp,
             "-to", clip.end_timestamp,
-            "-i", str(video_path),
+            "-i", str(source),
             "-c", "copy",
             str(output_file),
         ]
 
-        print(f"Creating clip {i}")
-
-        subprocess.run(
+        completed = subprocess.run(
             command,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            # ffmpeg puts the actual reason on stderr; swallowing it (the
+            # prototype sent both streams to DEVNULL) makes failures unreadable.
+            tail = (completed.stderr or "").strip().splitlines()[-5:]
+            raise RuntimeError(
+                f"ffmpeg failed on clip {index} "
+                f"({clip.start_timestamp}-{clip.end_timestamp}): "
+                + " | ".join(tail)
+            )
+
+        results.append(
+            {
+                "index": index,
+                "title": clip.title,
+                "topic": clip.topic,
+                "why_it_works": clip.why_it_works,
+                "start_timestamp": clip.start_timestamp,
+                "end_timestamp": clip.end_timestamp,
+                "duration_seconds": clip.duration_seconds,
+                "video_path": str(output_file),
+            }
         )
 
-        results.append({
-            "title": clip.title,
-            "topic": clip.topic,
-            "why_it_works": clip.why_it_works,
-            "start_timestamp": clip.start_timestamp,
-            "end_timestamp": clip.end_timestamp,
-            "duration_seconds": clip.duration_seconds,
-            "video_path": str(output_file),
-        })
-
     return results
-
-
-if __name__ == "__main__":
-
-    video_path = "videos/input/yt_video.mp4"
-
-    analysis = VideoAnalysis.model_validate(
-        {
-            "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            "clips": [
-                {
-                    "title": "Clip 1",
-                    "start_timestamp": "00:00:30",
-                    "end_timestamp": "00:00:56",
-                    "duration_seconds": 26,
-                    "topic": "Test",
-                    "why_it_works": "Testing",
-                },
-                {
-                    "title": "Clip 2",
-                    "start_timestamp": "00:03:00",
-                    "end_timestamp": "00:04:05",
-                    "duration_seconds": 65,
-                    "topic": "Test",
-                    "why_it_works": "Testing",
-                },
-            ],
-        }
-    )
-
-    try:
-        paths = create_clips(video_path, analysis)
-
-        print("\nCreated clips:")
-        for path in paths:
-            print(path)
-
-    except Exception as e:
-        print(f"Error: {e}")

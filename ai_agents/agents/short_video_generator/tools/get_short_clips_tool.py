@@ -1,23 +1,22 @@
-import re
 import json
+import logging
+import re
+import tempfile
 from datetime import timedelta
+from pathlib import Path
 
+import yt_dlp
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi
-
 from langchain.tools import tool
-# from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-
 from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+from youtube_transcript_api import YouTubeTranscriptApi
 
 from contracts import *
 
-import yt_dlp
-from pathlib import Path
-
-
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Gemini
 # llm = ChatGoogleGenerativeAI(
@@ -173,37 +172,40 @@ def extract_video_id(url: str) -> str:
     raise ValueError("Could not extract video ID")
 
 
-OUTPUT_DIR = Path("videos") / "captions"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-
 def get_transcript_from_captions(video_url: str) -> str:
     """
     Downloads YouTube captions using yt-dlp and returns the transcript
     in the same format as youtube-transcript-api.
+
+    The .vtt lands in a private temp directory that is removed on return, so
+    concurrent jobs can never read or delete each other's captions. The
+    prototype used a fixed ``videos/captions/`` and emptied it on entry.
     """
 
-    # Remove previous caption files
-    for file in OUTPUT_DIR.glob("*"):
-        if file.is_file():
-            file.unlink()
+    with tempfile.TemporaryDirectory(prefix="svg-captions-") as tmp:
+        caption_dir = Path(tmp)
 
-    ydl_opts = {
-        "skip_download": True,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en"],
-        "subtitlesformat": "vtt",
-        "outtmpl": str(OUTPUT_DIR / "captions"),
-        "overwrites": True,
-        "noplaylist": True,
-        "quiet": True,
-    }
+        ydl_opts = {
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en"],
+            "subtitlesformat": "vtt",
+            "outtmpl": str(caption_dir / "captions"),
+            "overwrites": True,
+            "noplaylist": True,
+            "quiet": True,
+        }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([video_url])
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
 
-    vtt_files = list(OUTPUT_DIR.glob("*.vtt"))
+        return _parse_vtt_dir(caption_dir)
+
+
+def _parse_vtt_dir(caption_dir: Path) -> str:
+    """Parse the first .vtt in ``caption_dir`` into the shared transcript format."""
+    vtt_files = list(caption_dir.glob("*.vtt"))
 
     if not vtt_files:
         raise Exception("No captions available.")
@@ -254,18 +256,7 @@ def get_transcript_from_captions(video_url: str) -> str:
 
         i += 1
 
-    transcript = "".join(transcript_parts)
-
-    with open(
-        "transcript.txt",
-        "w",
-        encoding="utf-8"
-    ) as f:
-        f.write(transcript)
-
-    print("Transcript downloaded from captions.")
-
-    return transcript
+    return "".join(transcript_parts)
 
 def seconds_to_timestamp(seconds):
     return str(timedelta(seconds=int(seconds)))
@@ -275,47 +266,34 @@ def get_transcript(video_url: str) -> str:
     """
     First tries YouTubeTranscriptApi.
     If that fails for any reason, falls back to downloading captions via yt-dlp.
+
+    Returns the transcript; writes nothing to disk. The prototype also wrote
+    ``transcript.txt`` into the current working directory, which two concurrent
+    jobs would overwrite for each other — and which silently littered whatever
+    directory the worker happened to start in.
     """
 
     video_id = extract_video_id(video_url)
     api = YouTubeTranscriptApi()
 
     try:
-        transcript = api.fetch(
-            video_id,
-            languages=["en"]
-        )
+        transcript = api.fetch(video_id, languages=["en"])
 
         transcript_parts = []
+        for item in transcript:
+            start = seconds_to_timestamp(item.start)
+            end = seconds_to_timestamp(item.start + item.duration)
+            transcript_parts.append(f"[{start} --> {end}]\n{item.text}\n\n")
 
-        with open(
-            "transcript.txt",
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            for item in transcript:
-
-                start = seconds_to_timestamp(item.start)
-                end = seconds_to_timestamp(
-                    item.start + item.duration
-                )
-
-                chunk = (
-                    f"[{start} --> {end}]\n"
-                    f"{item.text}\n\n"
-                )
-
-                transcript_parts.append(chunk)
-                f.write(chunk)
-
-        print("Transcript fetched using YouTube Transcript API.")
+        logger.info("transcript source=youtube_transcript_api video_id=%s", video_id)
         return "".join(transcript_parts)
 
-    except Exception as e:
-        print(f"Transcript API failed: {e}")
-        print("Falling back to yt-dlp captions...")
-
+    except Exception as exc:
+        logger.info(
+            "transcript source=captions_fallback video_id=%s api_error=%s",
+            video_id,
+            exc,
+        )
         return get_transcript_from_captions(video_url)
 
 def extract_json_from_response(response):
