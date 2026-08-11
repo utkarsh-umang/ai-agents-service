@@ -4,6 +4,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse, urlencode, parse_qsl
 import litellm
+from ai_agents.agents.email_finder.nodes.cost_utils import llm_call_cost
 from ai_agents.core.llm import langfuse, get_prompt
 from ai_agents.agents.email_finder.state import (
     CanonicalLead,
@@ -89,8 +90,8 @@ def _website_from_email(email: str | None) -> str | None:
     return f"https://{domain}"
 
 
-def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> dict:
-    """Use LiteLLM + OpenAI to classify raw row fields."""
+def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> tuple[dict, float]:
+    """Use LiteLLM + OpenAI to classify raw row fields. Returns (output, cost_usd)."""
     filled_prompt = get_prompt(
         "canonical_builder",
         source_type=source_type.value,
@@ -112,7 +113,43 @@ def _extract_via_llm(raw_row: dict, source_type: SourceType, trace_id: str) -> d
 
     import json
     content = response.choices[0].message.content.strip()
-    return json.loads(content)
+    return json.loads(content), llm_call_cost(response)
+
+
+def _structured_llm_output(raw_row: dict) -> dict:
+    """Map an already-canonical row (source='lms') into the shape
+    `_build_from_llm_output` expects, so the classifier LLM can be skipped.
+
+    Safe ONLY because an LMS queue row is already canonical — website is in the
+    `website` column, each social in its own column — so there is nothing to
+    *classify*, only to reshape. All downstream sanitization (social-platform
+    rejection, tracking-param strip, email-derived website) still runs via
+    `_build_from_llm_output`, so the output is identical to the LLM path minus
+    the round-trip. Do not use for free-shape rows where columns are ambiguous.
+    """
+    def pick(*keys: str) -> str | None:
+        for k in keys:
+            v = raw_row.get(k)
+            if v and str(v).strip():
+                return str(v).strip()
+        return None
+
+    return {
+        "website": pick("website", "Website"),
+        "existing_email": pick("email", "Email", "existing_email"),
+        "host_name": pick("host_name", "Host Name"),
+        "podcast_name": pick("podcast_name", "Podcast Name", "company_name"),
+        "channel_name": pick("channel_name", "Channel Name"),
+        "brand_name": pick("brand_name"),
+        "discovery_urls": [],
+        "social_links": {
+            "facebook": pick("facebook_url", "facebook"),
+            "twitter": pick("twitter_url", "twitter"),
+            "instagram": pick("instagram_url", "instagram"),
+            "youtube": pick("youtube_url", "channel_url", "youtube"),
+            "linkedin": pick("linkedin_url", "linkedin"),
+        },
+    }
 
 
 def _build_from_llm_output(
@@ -189,16 +226,28 @@ def _build_from_llm_output(
 def canonical_builder_to_graph_dict(
     raw_row: dict[str, Any],
     source_type: SourceType,
+    source: str | None = None,
 ) -> dict[str, Any]:
     """
     LangGraph entry node: returns partial state including trace_id and empty reducer lists.
+
+    When `source == "lms"` the row is already canonical (one field per column),
+    so we skip the classifier LLM entirely and reshape deterministically — a
+    per-lead latency + token-cost win with no recall change (the LMS is where
+    every lead comes from in production).
     """
     trace = langfuse.trace(name="email_finder", session_id="email_finder")
 
     try:
-        span = trace.span(name="llm_classification")
-        llm_output = _extract_via_llm(raw_row, source_type, trace_id=trace.id)
-        span.end()
+        if source == "lms":
+            span = trace.span(name="structured_classification")
+            llm_output = _structured_llm_output(raw_row)
+            llm_cost = 0.0
+            span.end()
+        else:
+            span = trace.span(name="llm_classification")
+            llm_output, llm_cost = _extract_via_llm(raw_row, source_type, trace_id=trace.id)
+            span.end()
 
         lead = _build_from_llm_output(llm_output, source_type, raw_row)
 
@@ -206,6 +255,7 @@ def canonical_builder_to_graph_dict(
             name="canonical_lead_built",
             metadata={
                 "source_type": source_type.value,
+                "classifier": "structured" if source == "lms" else "llm",
                 "has_website": bool(lead.website),
                 "discovery_urls_count": len(lead.discovery_urls),
             },
@@ -220,6 +270,7 @@ def canonical_builder_to_graph_dict(
             "trace_id": trace.id,
             "website_scrape_candidates": [],
             "scrape_plan": [],
+            "cost_usd": llm_cost,
         }
 
     except Exception as e:

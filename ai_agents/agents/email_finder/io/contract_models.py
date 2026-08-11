@@ -58,6 +58,11 @@ class DiscoveryOutput(BaseModel):
     discovery_meta: DiscoveryMeta = Field(default_factory=DiscoveryMeta)
     errors: list[str] = Field(default_factory=list)
     nodes_executed_delta: list[str] = Field(default_factory=lambda: ["url_discovery"])
+    # Emails/FB links harvested from the homepage HTML that discovery already
+    # fetched for link extraction — so the homepage isn't crawled a second time
+    # as the first fan-out page. Merged into the same reducers crawl_page feeds.
+    homepage_candidates: list[EmailCandidate] = Field(default_factory=list)
+    homepage_fb_links: list[str] = Field(default_factory=list)
 
 
 class CrawlPageInput(BaseModel):
@@ -93,6 +98,8 @@ class ResolveOutput(BaseModel):
     status: LeadStatus = LeadStatus.EMAIL_NOT_FOUND
     errors: list[str] = Field(default_factory=list)
     nodes_executed_delta: list[str] = Field(default_factory=lambda: ["resolve_best_email"])
+    # USD spent by this node's paid calls (feeds the graph's cost_usd reducer)
+    cost_usd: float = 0.0
 
 
 class PerplexityInput(BaseModel):
@@ -127,6 +134,7 @@ class WebsiteGuessOutput(BaseModel):
     status: LeadStatus = LeadStatus.PENDING
     errors: list[str] = Field(default_factory=list)
     nodes_executed_delta: list[str] = Field(default_factory=lambda: ["website_guesser"])
+    cost_usd: float = 0.0
 
 
 class PerplexityOutput(BaseModel):
@@ -137,6 +145,7 @@ class PerplexityOutput(BaseModel):
     status: LeadStatus
     errors: list[str] = Field(default_factory=list)
     nodes_executed_delta: list[str] = Field(default_factory=lambda: ["perplexity_discovery"])
+    cost_usd: float = 0.0
 
 
 class YouTubeEnrichInput(BaseModel):
@@ -163,6 +172,7 @@ class YouTubeEnrichOutput(BaseModel):
     nodes_executed_delta: list[str] = Field(
         default_factory=lambda: ["youtube_about_enricher"]
     )
+    cost_usd: float = 0.0
 
 
 class ValidateEmailInput(BaseModel):

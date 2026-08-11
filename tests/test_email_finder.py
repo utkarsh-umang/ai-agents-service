@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from ai_agents.agents.email_finder.adapters import merge_candidate_dicts
-from ai_agents.agents.email_finder.nodes.crawl_page import (
-    _extract_emails_from_text,
-    _mailto_from_html,
+from ai_agents.agents.email_finder.nodes.page_extract import (
+    extract_emails_from_text,
+    mailto_from_html,
 )
 from ai_agents.agents.email_finder.nodes.resolve_best_email import _parse_json_response
 from ai_agents.agents.email_finder.nodes.url_discovery import (
@@ -26,13 +26,36 @@ def test_extract_emails_basic() -> None:
     # example.com is deliberately NOT used here — it's rejected as a
     # placeholder domain (see test_placeholder_emails_rejected).
     t = "Reach us at hello@acmecorp.io or support@test.co.uk."
-    assert "hello@acmecorp.io" in _extract_emails_from_text(t)
-    assert "support@test.co.uk" in _extract_emails_from_text(t)
+    assert "hello@acmecorp.io" in extract_emails_from_text(t)
+    assert "support@test.co.uk" in extract_emails_from_text(t)
 
 
 def test_mailto_from_html() -> None:
     html = '<a href="mailto:Jane@Site.com?subject=Hi">x</a>'
-    assert _mailto_from_html(html) == ["Jane@Site.com"]
+    assert mailto_from_html(html) == ["Jane@Site.com"]
+
+
+def test_build_page_candidates_emails_and_fb() -> None:
+    from ai_agents.agents.email_finder.nodes.page_extract import build_page_candidates
+
+    html = (
+        '<a href="mailto:hi@acmelaw.com">mail</a> also tony@beastmodecamping.com '
+        '<a href="https://facebook.com/acmelaw">fb</a>'
+    )
+    cands, fb = build_page_candidates(html, "", "https://acmelaw.com", fb_already_known=False)
+    emails = {c.email for c in cands}
+    assert "hi@acmelaw.com" in emails
+    assert "tony@beastmodecamping.com" in emails
+    assert all(c.source == "website_scraper — https://acmelaw.com" for c in cands)
+    assert fb == ["https://facebook.com/acmelaw"]
+
+
+def test_build_page_candidates_skips_fb_when_known() -> None:
+    from ai_agents.agents.email_finder.nodes.page_extract import build_page_candidates
+
+    html = '<a href="https://facebook.com/acmelaw">fb</a> tony@beastmodecamping.com'
+    _cands, fb = build_page_candidates(html, "", "https://acmelaw.com", fb_already_known=True)
+    assert fb == []  # lead already has a FB link, don't harvest another
 
 
 def test_parse_json_response_strips_fences() -> None:
@@ -50,16 +73,20 @@ def test_score_url_keywords() -> None:
     assert _score_url("https://x.com/contact") > _score_url("https://x.com/blog/foo")
 
 
-def test_build_scrape_plan_home_first() -> None:
+def test_build_scrape_plan_excludes_homepage() -> None:
+    # The homepage is harvested during discovery, so it must NOT be re-crawled
+    # via the plan — even if it resurfaces as a discovered link.
     home = "https://site.com/"
     plan = _build_scrape_plan(
         home,
-        ["https://site.com/contact"],
-        ["https://site.com/about"],
-        max_urls=3,
+        ["https://site.com/contact", "https://site.com"],  # homepage in sitemap too
+        ["https://site.com/about", "https://site.com/"],   # and in homepage links
+        max_urls=5,
     )
-    assert plan[0] == home
-    assert len(plan) == 3
+    assert "https://site.com/contact" in plan
+    assert "https://site.com/about" in plan
+    # No trailing-slash variant of the homepage sneaks into the plan.
+    assert not any(u.rstrip("/") == "https://site.com" for u in plan)
 
 
 # ── youtube_about_enricher node + routing ─────────────────────────────────────
@@ -233,7 +260,7 @@ def test_build_context_skips_source_noise_and_urls() -> None:
 
 
 def _run_with_guess(monkeypatch, website, confidence):
-    monkeypatch.setattr(wg, "_guess", lambda name, ctx, tid: (website, confidence))
+    monkeypatch.setattr(wg, "_guess", lambda name, ctx, tid: (website, confidence, 0.0))
     out = wg.website_guesser_run(WebsiteGuessInput(lead=_lead(Bio="x"), trace_id="", source=None))
     return out.lead
 
@@ -456,8 +483,8 @@ def test_route_after_resolve_low_cost_ends_instead_of_escalating() -> None:
 
 
 def test_placeholder_emails_rejected() -> None:
-    from ai_agents.agents.email_finder.nodes.crawl_page import (
-        _extract_emails_from_text as _extract,
+    from ai_agents.agents.email_finder.nodes.page_extract import (
+        extract_emails_from_text as _extract,
     )
 
     text = "Subscribe: your@email.com. Docs: name@example.com. Real: tony@beastmodecamping.com"

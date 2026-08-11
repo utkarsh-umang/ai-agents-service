@@ -2,81 +2,26 @@
 from __future__ import annotations
 
 import asyncio
-import re
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+from crawl4ai import CacheMode, CrawlerRunConfig
 
-# Absolute wall-clock cap per crawl attempt. crawl4ai's own `page_timeout` covers
-# normal slow pages, but a hung browser/connection can blow past it — this asyncio
-# backstop guarantees we abandon a site after ~3 min instead of stalling the run.
-_CRAWL_HARD_TIMEOUT_S = 180
+# Absolute wall-clock cap per crawl. crawl4ai's own `page_timeout` (30s) covers
+# normal slow pages; this asyncio backstop only fires if the browser/connection
+# hangs past that. Kept at ~3x page_timeout so a genuinely stuck navigation is
+# abandoned well inside the lead's PER_LEAD_BUDGET_S instead of eating it.
+_CRAWL_HARD_TIMEOUT_S = 90
 
+from ai_agents.agents.email_finder.nodes import browser_pool
+from ai_agents.agents.email_finder.nodes.page_extract import build_page_candidates
 from ai_agents.agents.email_finder.adapters import crawl_input_from_worker_state, candidates_to_dicts
 from ai_agents.agents.email_finder.io.contract_models import CrawlPageInput, CrawlPageOutput
-from ai_agents.agents.email_finder.nodes.email_utils import confidence_for_email, enrich_confidence, filter_emails
-from ai_agents.agents.email_finder.state import EmailCandidate
 from ai_agents.core.llm import langfuse
 
-_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-    re.MULTILINE,
-)
 
-_FB_HREF_RE = re.compile(
-    r'href=["\']([^"\']*facebook\.com/[^"\']+)["\']',
-    re.IGNORECASE,
-)
-
-_FB_GENERIC_FRAGMENTS = frozenset(
-    {
-        "facebook.com/sharer",
-        "facebook.com/share",
-        "facebook.com/dialog",
-        "facebook.com/plugins",
-        "facebook.com/tr?",
-    }
-)
-
-
-def _extract_emails_from_text(text: str) -> list[str]:
-    if not text:
-        return []
-    found = set()
-    for m in _EMAIL_RE.findall(text):
-        e = m.strip().rstrip(".,);]")
-        if "@" in e and "." in e.split("@")[-1]:
-            found.add(e.lower())
-    return filter_emails(list(found))
-
-
-def _mailto_from_html(html: str) -> list[str]:
-    out: list[str] = []
-    for m in re.finditer(r'mailto:([^"\'>\s?]+)', html or "", re.I):
-        addr = m.group(1).split("?")[0].strip()
-        if "@" in addr:
-            out.append(addr)
-    return filter_emails(out)
-
-
-def _extract_fb_links(html: str) -> list[str]:
-    if not html:
-        return []
-    seen: set[str] = set()
-    out: list[str] = []
-    for m in _FB_HREF_RE.finditer(html):
-        url = m.group(1)
-        url_lower = url.lower()
-        if any(fragment in url_lower for fragment in _FB_GENERIC_FRAGMENTS):
-            continue
-        key = url_lower
-        if key not in seen:
-            seen.add(key)
-            out.append(url)
-    return out
-
-
-async def _crawl_once(browser_conf, run_conf, url: str):
-    async with AsyncWebCrawler(config=browser_conf) as crawler:
-        return await crawler.arun(url=url, config=run_conf)
+async def _crawl_once(run_conf, url: str):
+    # Runs on the process-wide shared browser (browser_pool) — no per-URL
+    # Chromium launch, and nothing to orphan when a crawl is cancelled at the
+    # lead's budget deadline.
+    return await browser_pool.crawl(url, run_conf)
 
 
 async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
@@ -87,7 +32,6 @@ async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
     )
     span = trace.span(name="crawl_page", metadata={"crawl_url": inp.url})
 
-    browser_conf = BrowserConfig(headless=True)
     run_conf = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         page_timeout=inp.page_timeout_ms,
@@ -95,32 +39,35 @@ async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
 
     result = None
     last_error: str = ""
-    for attempt in range(1, 3):  # 2 attempts
-        try:
-            result = await asyncio.wait_for(
-                _crawl_once(browser_conf, run_conf, inp.url),
-                timeout=_CRAWL_HARD_TIMEOUT_S,
-            )
-            if result.success:
-                break
+    # Single attempt. A failed crawl here is almost always a dead/blocked domain
+    # that an identical retry can't fix (crawl4ai 0.8.6 exposes no HTTP status to
+    # tell transient from deterministic), and the lead's fan-out already crawls
+    # several pages on the domain — so a transient blip on any one page is
+    # covered without retrying it. Retrying doubled the wasted time on dead sites
+    # and pushed leads past PER_LEAD_BUDGET_S into false timeout-fails.
+    try:
+        result = await asyncio.wait_for(
+            _crawl_once(run_conf, inp.url),
+            timeout=_CRAWL_HARD_TIMEOUT_S,
+        )
+        if not result.success:
             last_error = result.error_message or "unknown crawl failure"
-            trace.event(name="crawl_failed", metadata={"url": inp.url, "attempt": attempt, "error": last_error})
-        except asyncio.TimeoutError:
-            # Hung site — abandon it (no retry) so the lead can move on.
-            last_error = f"hard timeout after {_CRAWL_HARD_TIMEOUT_S}s"
-            trace.event(name="crawl_timeout", metadata={"url": inp.url, "attempt": attempt})
-            break
-        except Exception as e:
-            # Truncate internal crawl4ai stack paths — keep only the first sentence
-            raw = str(e)
-            last_error = raw.split("\n")[0][:200]
-            trace.event(name="crawl_error", metadata={"url": inp.url, "attempt": attempt, "error": last_error})
+            trace.event(name="crawl_failed", metadata={"url": inp.url, "error": last_error})
+    except asyncio.TimeoutError:
+        # Hung site — abandon it so the lead can move on.
+        last_error = f"hard timeout after {_CRAWL_HARD_TIMEOUT_S}s"
+        trace.event(name="crawl_timeout", metadata={"url": inp.url})
+    except Exception as e:
+        # Truncate internal crawl4ai stack paths — keep only the first sentence
+        raw = str(e)
+        last_error = raw.split("\n")[0][:200]
+        trace.event(name="crawl_error", metadata={"url": inp.url, "error": last_error})
 
     if result is None or not result.success:
         span.end()
         return CrawlPageOutput(
             candidates=[],
-            errors=[f"crawl_page failed after retries: {last_error}"],
+            errors=[f"crawl_page failed: {last_error}"],
             page_url=inp.url,
         )
 
@@ -128,38 +75,10 @@ async def _crawl_async(inp: CrawlPageInput) -> CrawlPageOutput:
     md = ""
     if result.markdown:
         md = getattr(result.markdown, "raw_markdown", None) or str(result.markdown)
-    blob = f"{html}\n{md}"
 
-    emails = set(_extract_emails_from_text(blob))
-
-    for m in _mailto_from_html(html):
-        emails.add(m.lower())
-
-    candidates: list[EmailCandidate] = []
-    for e in sorted(emails):
-        base_confidence = confidence_for_email(e)
-
-        enriched_confidence, note = enrich_confidence(
-            e,
-            inp.url,
-            blob,
-            base_confidence,
-        )
-
-        candidates.append(
-            EmailCandidate(
-                email=e,
-                source=f"website_scraper — {inp.url}",
-                confidence=enriched_confidence,
-                note=note,
-            )
-        )
-
-    # FB link extraction — skip if structured data already has a FB link
-    if inp.lead.social_links.facebook:
-        fb_links: list[str] = []
-    else:
-        fb_links = _extract_fb_links(html)
+    candidates, fb_links = build_page_candidates(
+        html, md, inp.url, bool(inp.lead.social_links.facebook)
+    )
 
     span.end()
     trace.event(

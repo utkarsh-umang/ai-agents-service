@@ -35,6 +35,7 @@ from ai_agents.agents.email_finder.nodes.canonical_builder import (
     _detect_social_platform,
     _strip_tracking_params,
 )
+from ai_agents.agents.email_finder.nodes.cost_utils import SCRAPINGBEE_COST_USD
 from ai_agents.agents.email_finder.nodes.email_utils import is_plus_addressed
 from ai_agents.agents.email_finder.state import (
     CanonicalLead,
@@ -172,7 +173,9 @@ def _fetch_about_scrapingbee(channel_url: str) -> dict:
         resp = client.get(SCRAPINGBEE_BASE_URL, params=params)
         resp.raise_for_status()
         html = resp.text
-    return _parse_about_html(html)
+    result = _parse_about_html(html)
+    result["paid"] = True  # a ScrapingBee credit was spent on this fetch
+    return result
 
 
 def fetch_youtube_about(channel_url: str) -> dict:
@@ -261,6 +264,7 @@ def youtube_about_enricher_run(inp: YouTubeEnrichInput) -> YouTubeEnrichOutput:
 
     try:
         about = fetch_youtube_about(channel_url)
+        cost = SCRAPINGBEE_COST_USD if about.get("paid") else 0.0
         website, found_socials, discovery = _classify_links(about["links"])
 
         # Enrich the lead in place (don't clobber existing values).
@@ -301,10 +305,11 @@ def youtube_about_enricher_run(inp: YouTubeEnrichInput) -> YouTubeEnrichOutput:
                 best_email=candidates[0],
                 status=LeadStatus.EMAIL_FOUND,
                 errors=[],
+                cost_usd=cost,
             )
 
         # No direct email — pass the enriched lead onward (PENDING = keep going).
-        return YouTubeEnrichOutput(lead=lead, status=LeadStatus.PENDING, errors=[])
+        return YouTubeEnrichOutput(lead=lead, status=LeadStatus.PENDING, errors=[], cost_usd=cost)
 
     except Exception as e:
         error_msg = str(e)
@@ -329,6 +334,7 @@ async def youtube_about_enricher_node_async(state: dict) -> dict:
         "status": out.status.value,
         "errors": out.errors,
         "nodes_executed": out.nodes_executed_delta,
+        "cost_usd": out.cost_usd,
     }
     if out.email_candidates:
         result["email_candidates"] = [c.model_dump(mode="json") for c in out.email_candidates]

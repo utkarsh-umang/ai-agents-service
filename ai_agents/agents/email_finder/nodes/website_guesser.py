@@ -24,6 +24,7 @@ from ai_agents.agents.email_finder.io.contract_models import (
     WebsiteGuessInput,
     WebsiteGuessOutput,
 )
+from ai_agents.agents.email_finder.nodes.cost_utils import llm_call_cost
 from ai_agents.agents.email_finder.nodes.canonical_builder import _detect_social_platform
 from ai_agents.agents.email_finder.state import LeadStatus
 from ai_agents.core.llm import langfuse
@@ -83,7 +84,8 @@ def _build_context(inp: WebsiteGuessInput, name: str) -> str:
     return "\n".join(parts) if parts else "(no extra details)"
 
 
-def _guess(name: str, context: str, trace_id: str) -> tuple[str | None, float]:
+def _guess(name: str, context: str, trace_id: str) -> tuple[str | None, float, float]:
+    """Returns (website, confidence, cost_usd)."""
     filled = _PROMPT.format(name=name, context=context)
     resp = litellm.completion(
         model=_MODEL,
@@ -95,15 +97,16 @@ def _guess(name: str, context: str, trace_id: str) -> tuple[str | None, float]:
         temperature=0,
         metadata={"langfuse_trace_id": trace_id, "langfuse_session_id": "email_finder"},
     )
+    cost = llm_call_cost(resp)
     data = json.loads(resp.choices[0].message.content.strip())
     website = data.get("website")
     if not isinstance(website, str) or not website.lower().startswith("http"):
-        return None, 0.0
+        return None, 0.0, cost
     try:
         confidence = float(data.get("confidence", 0.0))
     except (TypeError, ValueError):
         confidence = 0.0
-    return website.strip(), confidence
+    return website.strip(), confidence, cost
 
 
 def website_guesser_run(inp: WebsiteGuessInput) -> WebsiteGuessOutput:
@@ -119,7 +122,7 @@ def website_guesser_run(inp: WebsiteGuessInput) -> WebsiteGuessOutput:
         return WebsiteGuessOutput(lead=lead, status=LeadStatus.PENDING)
 
     try:
-        website, confidence = _guess(name, _build_context(inp, name), inp.trace_id)
+        website, confidence, cost = _guess(name, _build_context(inp, name), inp.trace_id)
 
         accepted = bool(
             website
@@ -141,7 +144,7 @@ def website_guesser_run(inp: WebsiteGuessInput) -> WebsiteGuessOutput:
                 "accepted": accepted,
             },
         )
-        return WebsiteGuessOutput(lead=lead, status=LeadStatus.PENDING)
+        return WebsiteGuessOutput(lead=lead, status=LeadStatus.PENDING, cost_usd=cost)
 
     except Exception as e:
         span.end()
@@ -165,4 +168,5 @@ async def website_guesser_node_async(state: dict) -> dict:
         "status": out.status.value,
         "errors": out.errors,
         "nodes_executed": out.nodes_executed_delta,
+        "cost_usd": out.cost_usd,
     }

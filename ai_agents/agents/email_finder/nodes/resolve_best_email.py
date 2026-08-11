@@ -8,6 +8,7 @@ import litellm
 
 from ai_agents.agents.email_finder.adapters import lead_to_dict, merge_candidate_dicts
 from ai_agents.agents.email_finder.io.contract_models import ResolveInput, ResolveOutput
+from ai_agents.agents.email_finder.nodes.cost_utils import llm_call_cost
 from ai_agents.agents.email_finder.state import EmailCandidate, LeadStatus
 from ai_agents.core.llm import get_prompt, langfuse
 
@@ -58,6 +59,7 @@ async def resolve_best_email_async(inp: ResolveInput) -> ResolveOutput:
         ),
     )
 
+    cost = 0.0
     try:
         response = litellm.completion(
             model="gpt-4o-mini",
@@ -71,6 +73,7 @@ async def resolve_best_email_async(inp: ResolveInput) -> ResolveOutput:
                 "langfuse_session_id": "email_finder",
             },
         )
+        cost = llm_call_cost(response)
         raw = response.choices[0].message.content or "{}"
         data = _parse_json_response(raw)
     except Exception as e:
@@ -79,6 +82,7 @@ async def resolve_best_email_async(inp: ResolveInput) -> ResolveOutput:
             best_email=None,
             status=LeadStatus.EMAIL_NOT_FOUND,
             errors=[f"resolve_best_email: {e}"],
+            cost_usd=cost,
         )
 
     chosen = (data.get("chosen_email") or "").strip() or None
@@ -90,6 +94,7 @@ async def resolve_best_email_async(inp: ResolveInput) -> ResolveOutput:
             best_email=None,
             status=LeadStatus.EMAIL_NOT_FOUND,
             errors=[f"resolver: {reason}"],
+            cost_usd=cost,
         )
 
     conf = float(data.get("confidence", 0.7))
@@ -106,6 +111,7 @@ async def resolve_best_email_async(inp: ResolveInput) -> ResolveOutput:
         best_email=best,
         status=LeadStatus.EMAIL_FOUND,
         errors=[],
+        cost_usd=cost,
     )
 
 
@@ -131,4 +137,5 @@ async def resolve_best_email_node_async(state: dict) -> dict:
         "email_candidates": merged,
         "errors": out.errors,
         "nodes_executed": out.nodes_executed_delta,
+        "cost_usd": out.cost_usd,
     }

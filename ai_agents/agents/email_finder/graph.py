@@ -41,7 +41,7 @@ from ai_agents.agents.email_finder.state import LeadStatus, SourceType
 
 def run_canonical_builder(state: EmailFinderGraphState) -> dict[str, Any]:
     st = source_type_from_state(state)
-    return canonical_builder_to_graph_dict(state["raw_row"], st)
+    return canonical_builder_to_graph_dict(state["raw_row"], st, state.get("source"))
 
 
 def _youtube_enabled(state: EmailFinderGraphState) -> bool:
@@ -154,7 +154,11 @@ def route_after_discover(state: EmailFinderGraphState) -> str | list[Send]:
                 "url": u,
                 "lead": lead,
                 "trace_id": tid,
-                "page_timeout_ms": 60000,
+                # 30s: a page that hasn't responded by then is a slow/hanging
+                # site, not a slow-but-good one — responsive contact/about pages
+                # answer in a few seconds. Caps the per-lead crawl tail so slow
+                # sites don't eat PER_LEAD_BUDGET_S. (was 60s)
+                "page_timeout_ms": 30000,
             },
         )
         for u in plan
@@ -368,6 +372,7 @@ def run_single(
                 "youtube_list": youtube_list,
                 "source": source,
                 "cost_mode": cost_mode,
+                "cost_usd": 0.0,
             }
         )
 
@@ -399,7 +404,7 @@ async def run_single_async(
         print(f"  [{index}/{total}] Starting: {label}")
         st_val = source_type.value if isinstance(source_type, SourceType) else source_type
         result = await graph.ainvoke(
-            {"raw_row": raw_row, "source_type": st_val, "youtube_list": youtube_list, "source": source, "cost_mode": cost_mode}
+            {"raw_row": raw_row, "source_type": st_val, "youtube_list": youtube_list, "source": source, "cost_mode": cost_mode, "cost_usd": 0.0}
         )
         status = result.get("status", "?")
         nodes = result.get("nodes_executed") or []

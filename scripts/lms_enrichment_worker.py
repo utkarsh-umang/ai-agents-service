@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
 
 import httpx
@@ -38,6 +39,9 @@ import httpx
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ai_agents.agents.email_finder.graph import build_graph, run_single_async  # noqa: E402
+from ai_agents.agents.email_finder.nodes import browser_pool  # noqa: E402
+from ai_agents.agents.email_finder.guest_finder import find_guest_email  # noqa: E402
+from ai_agents.agents.email_finder.company_finder import find_company_contact  # noqa: E402
 from ai_agents.agents.email_finder.state import LeadStatus, SourceType  # noqa: E402
 
 LMS_API = os.environ.get("LMS_API_URL", "http://localhost:8000").rstrip("/")
@@ -52,6 +56,12 @@ TRANSIENT_BACKOFF_S = 20.0
 # whole pipeline: a lead that exceeds this is recorded "failed" and the
 # page moves on. Generous — a normal lead with heavy crawling takes 1-3min.
 PER_LEAD_BUDGET_S = 300.0
+
+# Fully recycle the shared crawl browser (browser_pool) every N pages, between
+# pages where no crawl is in flight — a deterministic memory valve on top of the
+# in-browser page recycle. Replaces the old pkill reaper; the persistent browser
+# no longer orphans on cancel, so this is housekeeping, not leak-control.
+RECYCLE_EVERY_PAGES = 10
 
 # Signatures of errors that can never self-heal — pausing for a human is
 # the only correct response. Matched against the exception's full repr.
@@ -95,6 +105,59 @@ def _queue_item_to_raw_row(item: dict) -> dict:
     }
 
 
+def _queue_item_to_guest_lead(item: dict) -> dict:
+    """Queue item -> the identity dict the search-first guest finder needs."""
+    name = f"{(item.get('first_name') or '').strip()} {(item.get('last_name') or '').strip()}".strip()
+    return {
+        "name": name,
+        "company": item.get("company_name"),
+        "occupation": item.get("job_title"),
+        "industry": item.get("industry"),
+        "website": item.get("website"),
+        "linkedin": item.get("social_linkedin"),
+        "twitter": item.get("social_twitter"),
+        "instagram": item.get("social_instagram"),
+    }
+
+
+def _queue_item_to_company_lead(item: dict) -> dict:
+    """Queue item -> the company-as-lead dict the Clutch contact resolver needs."""
+    return {
+        "company": item.get("company_name"),
+        "clutch_profile_url": item.get("clutch_profile_url"),
+        "website": item.get("website"),
+    }
+
+
+def _company_result_payload(item: dict, state: dict, cost_mode: str) -> dict:
+    """Like _result_payload, but a company lead's result also carries WHO the
+    address belongs to (the resolver picked one senior person) and the verifier's
+    deliverability verdict."""
+    best = state.get("best_email") or {}
+    email = best.get("email") if isinstance(best, dict) else None
+    found = state.get("status") == LeadStatus.EMAIL_FOUND.value and bool(email)
+    failed = state.get("status") == LeadStatus.FAILED.value
+    name = (best.get("person_name") or "").strip()
+    first, last = (name.split(" ", 1) + [""])[:2] if name else ("", "")
+    return {
+        "lead_id": item["lead_id"],
+        "type": "email",
+        "cost_mode": cost_mode,
+        "status": "found" if found else ("failed" if failed else "not_found"),
+        "value": email if found else None,
+        "confidence": best.get("confidence") if found else None,
+        "provider": PROVIDER,
+        "cost_incurred": round(float(state.get("cost_usd") or 0.0), 6),
+        "evidence": state.get("evidence"),
+        # company-lead extras (person the address belongs to + verifier verdict)
+        "person_first_name": (first or None) if found else None,
+        "person_last_name": (last or None) if found else None,
+        "person_job_title": (best.get("person_title") or None) if found else None,
+        "person_seniority": (best.get("seniority") or None) if found else None,
+        "email_status": (best.get("email_status") or None) if found else None,
+    }
+
+
 def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
     best = state.get("best_email") or {}
     email = best.get("email") if isinstance(best, dict) else None
@@ -108,7 +171,40 @@ def _result_payload(item: dict, state: dict, cost_mode: str) -> dict:
         "value": email if found else None,
         "confidence": best.get("confidence") if found else None,
         "provider": PROVIDER,
+        # Real per-lead spend accumulated by the graph (exact litellm costs +
+        # estimated ScrapingBee/Perplexity per-call costs). Rounded: sub-cent
+        # precision matters when a lead costs $0.0003.
+        "cost_incurred": round(float(state.get("cost_usd") or 0.0), 6),
+        # Candidate context (guest finder) so a later logic change can re-score
+        # this attempt offline — no re-search, no re-scrape.
+        "evidence": state.get("evidence"),
+        # Verifier verdict when present (the pattern tier's Mailin result:
+        # "ok" | "catch_all"). Stored on lead.email_status; None for the free
+        # search tier, which does no paid verification.
+        "email_status": (best.get("email_status") if found else None),
     }
+
+
+def _reap_stale_browsers() -> None:
+    """Clear any Crawl4AI/Playwright chromium left by a PREVIOUS worker instance.
+
+    Steady-state there are no orphans: the finder shares one persistent browser
+    (browser_pool) that a cancelled crawl can't orphan, and a clean shutdown
+    closes it. But launchd stops the daemon with SIGTERM/SIGKILL, which runs no
+    Python cleanup — so a hard kill can leave the previous instance's single
+    browser behind. Running this ONCE at startup (before our pool is created)
+    guarantees at most one live browser at any time across restarts.
+
+    Path-scoped to Playwright's own chromium build so a user's Chrome/Brave is
+    untouched. Best-effort — pkill exit 1 just means nothing to reap."""
+    try:
+        subprocess.run(
+            ["pkill", "-f", "ms-playwright/chromium"],
+            capture_output=True,
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001 — startup reap must never break boot
+        print(f"[worker] startup browser reap skipped: {type(exc).__name__}: {exc}")
 
 
 async def _heartbeat(client: httpx.AsyncClient, state: str, detail: str | None = None, in_flight: int = 0) -> None:
@@ -152,23 +248,49 @@ async def process_page(
             # Hold the concurrency slot OUTSIDE the budget timer — a lead
             # queued behind others must not burn budget while waiting. The
             # inner call gets a fresh single-use semaphore that never blocks.
+            # Routing: a Clutch company-lead (has a profile URL, no person/site)
+            # goes to the company-contact resolver; a podscan GUEST (a tagged
+            # person to search for by name+company) to the guest finder;
+            # everything else — including a podscan HOST (the podcast itself, a
+            # site to crawl, no person) — to the crawl graph.
+            is_company = bool(item.get("clutch_profile_url"))
+            # podscan-host carries lead_tag='podcast_host' but no person, so it
+            # must NOT go to the person-search guest finder — the crawl graph
+            # scrapes its website for the show's email instead.
+            is_guest = bool(item.get("lead_tag")) and item.get("lead_tag") != "podcast_host"
             async with semaphore:
-                state = await asyncio.wait_for(
-                    run_single_async(
-                        graph,
-                        _queue_item_to_raw_row(item),
-                        SourceType.YOUTUBE_SCRIPT_TOOL,
-                        asyncio.Semaphore(1),
-                        # youtube_list enables the About-page enricher for
-                        # leads with a YouTube URL and no website — the graph
-                        # gates per-lead, so it's safe unconditionally.
-                        youtube_list=True,
-                        source="lms",
-                        cost_mode=cost_mode,
-                    ),
-                    timeout=PER_LEAD_BUDGET_S,
-                )
-            await post_result(_result_payload(item, state, cost_mode), item)
+                if is_company:
+                    # Sync (drives Crawl4AI + async I/O on its own loop) -> thread.
+                    state = await asyncio.wait_for(
+                        asyncio.to_thread(find_company_contact, _queue_item_to_company_lead(item), cost_mode),
+                        timeout=PER_LEAD_BUDGET_S,
+                    )
+                elif is_guest:
+                    # Tagged (podscan) lead -> the search-first guest finder.
+                    # It's sync (drives Crawl4AI on a private loop), so run it in
+                    # a thread to keep this event loop free.
+                    state = await asyncio.wait_for(
+                        asyncio.to_thread(find_guest_email, _queue_item_to_guest_lead(item), cost_mode),
+                        timeout=PER_LEAD_BUDGET_S,
+                    )
+                else:
+                    state = await asyncio.wait_for(
+                        run_single_async(
+                            graph,
+                            _queue_item_to_raw_row(item),
+                            SourceType.YOUTUBE_SCRIPT_TOOL,
+                            asyncio.Semaphore(1),
+                            # youtube_list enables the About-page enricher for
+                            # leads with a YouTube URL and no website — the graph
+                            # gates per-lead, so it's safe unconditionally.
+                            youtube_list=True,
+                            source="lms",
+                            cost_mode=cost_mode,
+                        ),
+                        timeout=PER_LEAD_BUDGET_S,
+                    )
+            payload = (_company_result_payload if is_company else _result_payload)(item, state, cost_mode)
+            await post_result(payload, item)
         except asyncio.TimeoutError:
             label = item.get("youtube_channel_name") or item["lead_id"]
             print(f"[worker]   {label}: exceeded {PER_LEAD_BUDGET_S:.0f}s budget — recording failed")
@@ -242,8 +364,13 @@ async def main() -> None:
           f"page={args.limit} concurrency={args.concurrency} "
           f"mode={'once' if args.once else 'daemon'}")
 
+    # Clear any browser a previous (hard-killed) instance left behind before we
+    # start our own persistent one.
+    _reap_stale_browsers()
+
     pages_done = 0
-    async with httpx.AsyncClient(timeout=CLIENT_TIMEOUT_S) as client:
+    client = httpx.AsyncClient(timeout=CLIENT_TIMEOUT_S)
+    try:
         while True:
             if args.pages is not None and pages_done >= args.pages:
                 print(f"[worker] page limit ({args.pages}) reached — done")
@@ -272,6 +399,11 @@ async def main() -> None:
                                  f"processing {len(items)} leads", len(items))
                 await process_page(client, items, args.cost_mode, args.concurrency)
                 pages_done += 1
+                # Between pages, no crawl is in flight. The shared browser is
+                # persistent (no per-crawl orphans anymore), so this is just a
+                # periodic full recycle to bound memory — not leak-control.
+                if pages_done % RECYCLE_EVERY_PAGES == 0:
+                    await browser_pool.recycle_crawler()
 
             except HardBlock as exc:
                 reason = f"Email finder paused: {exc}"
@@ -293,6 +425,12 @@ async def main() -> None:
                 if args.once:
                     sys.exit(1)
                 await asyncio.sleep(TRANSIENT_BACKOFF_S)
+    finally:
+        # Clean shutdown (once-mode / page-limit / Ctrl-C): close the shared
+        # browser so it isn't orphaned. (A SIGKILL skips this — the startup
+        # reap covers that case on the next boot.)
+        await browser_pool.close_crawler()
+        await client.aclose()
 
 
 if __name__ == "__main__":
