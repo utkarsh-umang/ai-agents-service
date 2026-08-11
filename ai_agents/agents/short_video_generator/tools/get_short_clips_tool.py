@@ -15,6 +15,9 @@ from ai_agents.agents.short_video_generator.contracts import VideoAnalysis
 
 logger = logging.getLogger(__name__)
 
+# Inline markup in auto-generated VTT: <00:00:07.720>, <c>, </c>.
+_VTT_TAG = re.compile(r"<[^>]*>")
+
 CLIP_MODEL = "gpt-4o-mini"
 # Structured extraction against a fixed schema — creativity here buys nothing and
 # costs schema adherence. The prototype ran this at 0.7.
@@ -210,6 +213,32 @@ def get_transcript_from_captions(video_url: str) -> str:
         return _parse_vtt_dir(caption_dir)
 
 
+def _strip_overlap(previous: str, current: str) -> str:
+    """Return the part of ``current`` not already covered by ``previous``.
+
+    Rolling captions produce cues like::
+
+        this program is brought to you by
+        this program is brought to you by Stanford University please visit us at
+        Stanford University please visit us at
+
+    Only the newly revealed words are wanted. Finds the longest suffix of
+    ``previous`` that prefixes ``current`` and drops it; an exact repeat
+    collapses to nothing.
+    """
+    if not previous:
+        return current
+    prev_words = previous.split()
+    cur_words = current.split()
+    if not cur_words:
+        return ""
+    limit = min(len(prev_words), len(cur_words))
+    for size in range(limit, 0, -1):
+        if prev_words[-size:] == cur_words[:size]:
+            return " ".join(cur_words[size:])
+    return current
+
+
 def _parse_vtt_dir(caption_dir: Path) -> str:
     """Parse the first .vtt in ``caption_dir`` into the shared transcript format."""
     vtt_files = list(caption_dir.glob("*.vtt"))
@@ -218,6 +247,7 @@ def _parse_vtt_dir(caption_dir: Path) -> str:
         raise Exception("No captions available.")
 
     transcript_parts = []
+    _last_text = [""]  # tail of what has been emitted, for rolling-caption dedupe
 
     with open(vtt_files[0], "r", encoding="utf-8") as f:
         lines = f.readlines()
@@ -244,6 +274,13 @@ def _parse_vtt_dir(caption_dir: Path) -> str:
 
             text = " ".join(text_lines)
 
+            # Auto-captions carry per-word timing markup —
+            # "this<00:00:07.720><c> program</c><00:00:08.160><c> is</c>" — which
+            # is pure noise to the model and inflates the transcript roughly 6x.
+            # On a 15-minute talk that is 98k characters instead of 16k; left in,
+            # a long podcast would blow the context window on markup alone.
+            text = _VTT_TAG.sub("", text)
+
             # Remove duplicated words that appear in some auto captions
             words = text.split()
             cleaned = []
@@ -252,7 +289,17 @@ def _parse_vtt_dir(caption_dir: Path) -> str:
                 if not cleaned or cleaned[-1] != word:
                     cleaned.append(word)
 
-            text = " ".join(cleaned)
+            text = " ".join(cleaned).strip()
+
+            # YouTube's rolling captions restate the tail of the previous cue as
+            # the window scrolls, so consecutive chunks overlap heavily. Emit
+            # only what is new, or the model reads the same sentence four times
+            # and the transcript triples for no added information.
+            text = _strip_overlap(_last_text[0], text)
+            if not text:
+                i += 1
+                continue
+            _last_text[0] = (_last_text[0] + " " + text).strip()[-400:]
 
             chunk = (
                 f"[{start} --> {end}]\n"
