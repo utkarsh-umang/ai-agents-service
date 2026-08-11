@@ -6,27 +6,34 @@ from datetime import timedelta
 from pathlib import Path
 
 import yt_dlp
-from dotenv import load_dotenv
 from langchain.tools import tool
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from youtube_transcript_api import YouTubeTranscriptApi
 
-from contracts import *
-
-load_dotenv()
+from ai_agents.agents.short_video_generator.contracts import VideoAnalysis
 
 logger = logging.getLogger(__name__)
 
-# Gemini
-# llm = ChatGoogleGenerativeAI(
-#     model="gemini-3.5-flash",
-#     temperature=0.2
-# )
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    temperature=0.7,
-)
+CLIP_MODEL = "gpt-4o-mini"
+# Structured extraction against a fixed schema — creativity here buys nothing and
+# costs schema adherence. The prototype ran this at 0.7.
+CLIP_TEMPERATURE = 0.2
+
+_llm = None
+
+
+def _get_llm() -> ChatOpenAI:
+    """The clip-selection model, constructed on first use and cached.
+
+    Constructed lazily so importing this module does not require OPENAI_API_KEY
+    or open a client; that made the agent unimportable wherever the key was
+    absent, and paid the cost even for callers that never selected clips.
+    """
+    global _llm
+    if _llm is None:
+        _llm = ChatOpenAI(model=CLIP_MODEL, temperature=CLIP_TEMPERATURE)
+    return _llm
 
 SHORTS_PROMPT = """
 
@@ -324,7 +331,7 @@ def get_shorts_clips(video_url: str):
         transcript=transcript_text
     )
 
-    response = llm.invoke([
+    response = _get_llm().invoke([
         HumanMessage(content=query)
     ])
 

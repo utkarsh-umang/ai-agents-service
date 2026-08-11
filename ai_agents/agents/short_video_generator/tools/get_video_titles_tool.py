@@ -1,25 +1,45 @@
 import os
-from dotenv import load_dotenv
 from datetime import datetime
-from googleapiclient.discovery import build
-
-import requests
-from isodate import parse_duration
 from urllib.parse import urlparse
 
+import requests
+from googleapiclient.discovery import build
+from isodate import parse_duration
 from langchain.tools import tool
 
-from contracts import *
-
-load_dotenv()
-
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-
-youtube = build(
-    "youtube",
-    "v3",
-    developerKey=YOUTUBE_API_KEY
+from ai_agents.agents.short_video_generator.contracts import (
+    ChannelVideos,
+    VideoMetadata,
 )
+
+# Minimum source length. Anything shorter is not long-form and has nothing worth
+# clipping out of it.
+MIN_LONGFORM_SECONDS = 180
+
+_youtube_client = None
+
+
+def _api_key() -> str:
+    key = os.getenv("YOUTUBE_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "YOUTUBE_API_KEY is not set — required to list a channel's videos."
+        )
+    return key
+
+
+def _youtube():
+    """The Data API client, built on first use and cached.
+
+    Built lazily on purpose: this used to run at import time, so merely
+    importing the module raised when YOUTUBE_API_KEY was absent — which made
+    the whole agent unimportable in any environment that only needed the
+    clip-selection half.
+    """
+    global _youtube_client
+    if _youtube_client is None:
+        _youtube_client = build("youtube", "v3", developerKey=_api_key())
+    return _youtube_client
 
 
 
@@ -59,7 +79,7 @@ def get_channel_id(channel_url: str) -> str:
             "q": handle,
             "type": "channel",
             "maxResults": 1,
-            "key": YOUTUBE_API_KEY,
+            "key": _api_key(),
         }
 
         response = requests.get(url, params=params)
@@ -83,7 +103,7 @@ def get_video_titles(channel_url: str, limit: int = 5) -> ChannelVideos:
 
     channel_id = get_channel_id(channel_url)
 
-    channel_response = youtube.channels().list(
+    channel_response = _youtube().channels().list(
         part="contentDetails",
         id=channel_id
     ).execute()
@@ -95,7 +115,7 @@ def get_video_titles(channel_url: str, limit: int = 5) -> ChannelVideos:
         ["uploads"]
     )
 
-    playlist_response = youtube.playlistItems().list(
+    playlist_response = _youtube().playlistItems().list(
         part="snippet",
         playlistId=uploads_playlist_id,
         maxResults=100
@@ -113,7 +133,7 @@ def get_video_titles(channel_url: str, limit: int = 5) -> ChannelVideos:
 
         batch_ids = video_ids[i:i + 50]
 
-        videos_response = youtube.videos().list(
+        videos_response = _youtube().videos().list(
             part="snippet,contentDetails,statistics,status",
             id=",".join(batch_ids)
         ).execute()
@@ -123,7 +143,7 @@ def get_video_titles(channel_url: str, limit: int = 5) -> ChannelVideos:
             duration = item["contentDetails"]["duration"]
             seconds = int(parse_duration(duration).total_seconds())
 
-            if seconds < 180:
+            if seconds < MIN_LONGFORM_SECONDS:
                 continue
 
             snippet = item["snippet"]
@@ -175,6 +195,4 @@ def get_video_titles(channel_url: str, limit: int = 5) -> ChannelVideos:
             if len(videos) >= limit:
                 return ChannelVideos(videos=videos)
             
-    print(videos)
-
     return ChannelVideos(videos=videos)

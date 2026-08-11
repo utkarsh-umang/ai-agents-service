@@ -1,44 +1,63 @@
-from dotenv import load_dotenv
-
 import json
+import logging
 
-# from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langfuse.langchain import CallbackHandler
-
-from langgraph.graph import StateGraph, MessagesState, END
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from tools.get_video_titles_tool import get_video_titles
-from tools.get_short_clips_tool import get_shorts_clips
-
-from contracts.models import VideoAnalysis
-
-from helpers.validate_links import is_valid_youtube_url
-
-load_dotenv()
-
-# Langfuse
-langfuse_handler = CallbackHandler()
-
-# Tools
-tools = [
+from ai_agents.agents.short_video_generator.contracts import VideoAnalysis
+from ai_agents.agents.short_video_generator.helpers.validate_links import (
+    is_valid_youtube_url,
+)
+from ai_agents.agents.short_video_generator.tools.get_short_clips_tool import (
+    get_shorts_clips,
+)
+from ai_agents.agents.short_video_generator.tools.get_video_titles_tool import (
     get_video_titles,
-    get_shorts_clips
-]
-
-# LLM
-# llm = ChatGoogleGenerativeAI(
-#     model="gemini-3.5-flash",
-#     temperature=0.7
-# )
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    temperature=0.7,
 )
 
-llm_with_tools = llm.bind_tools(tools)
+logger = logging.getLogger(__name__)
+
+ROUTER_MODEL = "gpt-4o-mini"
+# This model only routes to tools; its prose is discarded (see run_short_video_agent).
+ROUTER_TEMPERATURE = 0.0
+RECURSION_LIMIT = 10
+
+TOOLS = [get_video_titles, get_shorts_clips]
+
+_llm_with_tools = None
+_langfuse_handler = None
+_app = None
+
+
+def _get_llm_with_tools():
+    global _llm_with_tools
+    if _llm_with_tools is None:
+        _llm_with_tools = ChatOpenAI(
+            model=ROUTER_MODEL, temperature=ROUTER_TEMPERATURE
+        ).bind_tools(TOOLS)
+    return _llm_with_tools
+
+
+def _get_callbacks() -> list:
+    """Langfuse callback, if Langfuse is configured.
+
+    Returns an empty list when the handler cannot be constructed, so tracing
+    being unavailable degrades observability instead of failing the job. This
+    used to be built at import time, which made Langfuse config a hard
+    requirement for importing the agent at all.
+    """
+    global _langfuse_handler
+    if _langfuse_handler is None:
+        try:
+            from langfuse.langchain import CallbackHandler
+
+            _langfuse_handler = CallbackHandler()
+        except Exception as exc:
+            logger.warning("langfuse tracing disabled: %s", exc)
+            _langfuse_handler = False
+    return [_langfuse_handler] if _langfuse_handler else []
 
 SYSTEM_PROMPT = """
 You are a YouTube AI assistant.
@@ -97,19 +116,14 @@ def agent(state: MessagesState):
             *messages
         ]
 
-    response = llm_with_tools.invoke(
+    response = _get_llm_with_tools().invoke(
         messages,
-        config={
-            "callbacks": [langfuse_handler]
-        }
+        config={"callbacks": _get_callbacks()},
     )
 
     return {
         "messages": [response]
     }
-
-
-tool_node = ToolNode(tools)
 
 
 def should_continue(state: MessagesState):
@@ -122,58 +136,66 @@ def should_continue(state: MessagesState):
     return END
 
 
-graph = StateGraph(MessagesState)
+def _get_app():
+    """Compile the graph on first use and cache it.
 
-graph.add_node("agent", agent)
-graph.add_node("tools", tool_node)
-
-graph.set_entry_point("agent")
-
-graph.add_conditional_edges(
-    "agent",
-    should_continue
-)
-
-graph.add_edge(
-    "tools",
-    "agent"
-)
-
-app = graph.compile()
+    Compiling at import time meant importing this module built a LangGraph and
+    an LLM client as a side effect.
+    """
+    global _app
+    if _app is None:
+        graph = StateGraph(MessagesState)
+        graph.add_node("agent", agent)
+        graph.add_node("tools", ToolNode(TOOLS))
+        graph.set_entry_point("agent")
+        graph.add_conditional_edges("agent", should_continue)
+        graph.add_edge("tools", "agent")
+        _app = graph.compile()
+    return _app
 
 
-def get_shorts(url: str) -> VideoAnalysis:
-    
-    if not is_valid_youtube_url(url):
-        raise ValueError("URL not valid.")    
+def run_short_video_agent(video_url: str) -> VideoAnalysis:
+    """Analyse a long-form YouTube video and return clip candidates.
 
-    query = f"""
-Get shorts from this YouTube URL:
-{url}
-"""
+    Returns timestamps and reasoning only — never video bytes. Downloading and
+    cutting are the caller's job (see the helpers package).
 
-    result = app.invoke(
-        {
-            "messages": [
-                HumanMessage(content=query)
-            ]
-        },
+    Args:
+        video_url: A YouTube watch URL.
+
+    Returns:
+        VideoAnalysis with 5-10 clips of 60-80s, each carrying a title, topic
+        and why_it_works.
+
+    Raises:
+        ValueError: if ``video_url`` is not a valid YouTube URL.
+        RuntimeError: if the agent never called the clip-selection tool.
+    """
+    if not is_valid_youtube_url(video_url):
+        raise ValueError(f"not a valid YouTube URL: {video_url!r}")
+
+    query = f"Get shorts from this YouTube URL:\n{video_url}"
+
+    result = _get_app().invoke(
+        {"messages": [HumanMessage(content=query)]},
         config={
-            "callbacks": [langfuse_handler],
-            "recursion_limit": 10
-        }
+            "callbacks": _get_callbacks(),
+            "recursion_limit": RECURSION_LIMIT,
+        },
     )
 
+    # Read the tool's own output rather than the model's final message: the
+    # router is free to paraphrase, and the tool already returns a validated
+    # VideoAnalysis. Walk backwards to pick up the most recent call.
     for message in reversed(result["messages"]):
+        if isinstance(message, ToolMessage) and message.name == "get_shorts_clips":
+            return VideoAnalysis.model_validate(json.loads(message.content))
 
-        if (
-            isinstance(message, ToolMessage)
-            and message.name == "get_shorts_clips"
-        ):
+    raise RuntimeError(
+        "the agent finished without calling get_shorts_clips — no clips produced"
+    )
 
-            data = json.loads(message.content)
 
-            return VideoAnalysis.model_validate(data)
-
-    raise RuntimeError("get_shorts_clips did not return any result.")
+# Original name, kept so the notebook keeps working.
+get_shorts = run_short_video_agent
 
